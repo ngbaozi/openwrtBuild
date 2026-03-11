@@ -1,0 +1,153 @@
+name: LEDE 多线程云编译（官方源码+全插件）
+
+on:
+  workflow_dispatch:  # 仅手动触发，避免定时占用资源
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  build-lede:
+    name: 多线程编译 LEDE 固件
+    runs-on: ubuntu-22.04
+    steps:
+      # 步骤1：初始化环境 + 深度清理
+      - name: 清理环境 & 安装依赖
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          # 清理无用文件，释放磁盘（关键：多线程编译占空间更大）
+          docker image prune -af
+          sudo rm -rf /usr/share/dotnet /etc/mysql /etc/php /usr/local/lib/android /opt/ghc
+          sudo apt-mark hold grub-efi-amd64-signed
+          sudo apt update -y
+          sudo apt purge -y azure-cli* docker* ghc* zulu* llvm* firefox google* dotnet* powershell* openjdk* mysql* php* mongodb* snap*
+          # 安装编译依赖（完整）
+          sudo apt install -y ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential bzip2 ccache clang cmake cpio curl device-tree-compiler flex gawk gcc-multilib g++-multilib gettext genisoimage git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libfuse-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libpython3-dev libreadline-dev libssl-dev libtool llvm lrzsz msmtp ninja-build p7zip p7zip-full patch pkgconf python3 python3-pyelftools python3-setuptools qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev
+          # 系统优化
+          sudo apt full-upgrade -y
+          sudo apt autoremove -y --purge
+          sudo apt clean -y
+          sudo timedatectl set-timezone "Asia/Shanghai"
+
+      # 步骤2：额外释放磁盘（多线程编译需要更多空间）
+      - name: 深度清理磁盘
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          swap-storage: true
+
+      # 步骤3：拉取官方 LEDE 源码
+      - name: 克隆 LEDE 官方源码
+        uses: actions/checkout@v4
+        with:
+          repository: coolsnowwolf/lede
+          ref: master
+          fetch-depth: 1
+          submodules: true
+
+      # 步骤4：添加 kenzok8 插件仓库
+      - name: 添加自定义软件源
+        run: |
+          echo 'src-git kenzo https://github.com/kenzok8/openwrt-packages.git' >> feeds.conf.default
+          echo 'src-git small https://github.com/kenzok8/small.git' >> feeds.conf.default
+          sed -i 's/src-git helloworld/#src-git helloworld/g' feeds.conf.default
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      # 步骤5：启用所有插件
+      - name: 配置插件
+        run: |
+          make defconfig
+          cat >> .config << EOF
+          CONFIG_PACKAGE_luci-app-passwall=y
+          CONFIG_PACKAGE_luci-app-ssr-plus=y
+          CONFIG_PACKAGE_luci-app-adguardhome=y
+          CONFIG_PACKAGE_luci-app-mosdns=y
+          CONFIG_PACKAGE_luci-app-turboacc=y
+          CONFIG_PACKAGE_luci-app-filebrowser=y
+          CONFIG_PACKAGE_luci-app-openlist2=y
+          CONFIG_PACKAGE_luci-app-syncdial=y
+          CONFIG_PACKAGE_luci-app-samba4=y
+          CONFIG_PACKAGE_luci-theme-argon=y
+          # 核心依赖
+          CONFIG_PACKAGE_turboacc-config=y
+          CONFIG_PACKAGE_v2ray-core=y
+          CONFIG_PACKAGE_sing-box=y
+          CONFIG_PACKAGE_haproxy=y
+          EOF
+          sed -i 's/# CONFIG_PACKAGE_luci-app-passwall is not set/CONFIG_PACKAGE_luci-app-passwall=y/' .config
+          sed -i 's/# CONFIG_PACKAGE_luci-app-ssr-plus is not set/CONFIG_PACKAGE_luci-app-ssr-plus=y/' .config
+          sed -i 's/# CONFIG_PACKAGE_luci-theme-argon is not set/CONFIG_PACKAGE_luci-theme-argon=y/' .config
+          make defconfig
+
+      # 步骤6：多线程下载依赖（提前缓存，避免编译时下载卡顿）
+      - name: 多线程下载依赖包
+        run: |
+          # 用8线程下载（GitHub环境足够支撑）
+          make download -j8
+          # 缓存依赖到本地，加速后续编译
+          find ./dl -type f -name "*.tar.gz" -o -name "*.zip" -o -name "*.tar.xz" | xargs touch
+        continue-on-error: true
+
+      # 步骤7：多线程编译（核心优化）
+      - name: 多线程编译固件
+        run: |
+          # 第一步：获取CPU核心数，自动计算最优线程数
+          CORE_COUNT=$(nproc)
+          OPTIMAL_JOBS=$((CORE_COUNT * 2))  # 核心数×2（2核→4线程，4核→8线程）
+          echo "当前CPU核心数：$CORE_COUNT，最优线程数：$OPTIMAL_JOBS"
+          
+          # 第二步：尝试最优线程数编译
+          make -j$OPTIMAL_JOBS || {
+            # 失败则降级为 核心数 线程编译
+            echo "多线程编译失败，降级为 $CORE_COUNT 线程编译..."
+            make -j$CORE_COUNT || {
+              # 仍失败则单线程编译（带详细日志，便于排查问题）
+              echo "降级编译仍失败，单线程调试编译..."
+              make -j1 V=s
+            }
+          }
+          
+          # 输出编译信息
+          echo "==================== 编译完成，磁盘使用情况 ===================="
+          df -h
+          du -h --max-depth=1 ./bin
+
+      # 步骤8：整理产物
+      - name: 整理固件/插件
+        run: |
+          mkdir -p ./artifact/firmware ./artifact/packages ./artifact/buildinfo
+          cp -rf ./bin/targets/*/*/*.bin ./artifact/firmware/
+          cp -rf ./bin/targets/*/*/*.img ./artifact/firmware/
+          cp -rf ./bin/targets/*/*/*.xz ./artifact/firmware/
+          cp -rf ./bin/packages/*/*/*.ipk ./artifact/packages/
+          cp -rf ./bin/targets/*/*/*.buildinfo ./artifact/buildinfo/
+          cp -rf ./.config ./artifact/buildinfo/
+
+      # 步骤9：上传产物
+      - name: 上传固件
+        uses: actions/upload-artifact@v4
+        with:
+          name: LEDE_Firmware_MultiThread
+          path: ./artifact/firmware/
+          retention-days: 30
+
+      - name: 上传插件包
+        uses: actions/upload-artifact@v4
+        with:
+          name: LEDE_Plugins_IPK
+          path: ./artifact/packages/
+          retention-days: 30
+
+      - name: 上传编译信息
+        uses: actions/upload-artifact@v4
+        with:
+          name: LEDE_Build_Info
+          path: ./artifact/buildinfo/
+          retention-days: 30
