@@ -117,34 +117,48 @@ jobs:
           du -h --max-depth=1 ./bin
 
       # 步骤8：整理产物
-      - name: 整理固件/插件
+      - name: 整理产物（核心修复：适配实际文件格式）
         run: |
-          mkdir -p ./artifact/firmware ./artifact/packages ./artifact/buildinfo
-          cp -rf ./bin/targets/*/*/*.bin ./artifact/firmware/
-          cp -rf ./bin/targets/*/*/*.img ./artifact/firmware/
-          cp -rf ./bin/targets/*/*/*.xz ./artifact/firmware/
-          cp -rf ./bin/packages/*/*/*.ipk ./artifact/packages/
-          cp -rf ./bin/targets/*/*/*.buildinfo ./artifact/buildinfo/
-          cp -rf ./.config ./artifact/buildinfo/
+          # 1. 创建正确的目录（修复packages→package的拼写错误）
+          mkdir -p ./artifact/firmware ./artifact/package ./artifact/buildinfo
+          
+          # 2. 复制固件文件（适配x86_64实际生成的格式：.img.gz、.bin、.iso等）
+          # 使用 || true 避免单个文件不存在导致整个命令失败
+          cp -rf ./bin/targets/x86/64/*.img.gz ./artifact/firmware/ || true
+          cp -rf ./bin/targets/x86/64/*.bin ./artifact/firmware/ || true
+          cp -rf ./bin/targets/x86/64/*.iso ./artifact/firmware/ || true
+          cp -rf ./bin/targets/x86/64/*.tar.gz ./artifact/firmware/ || true
+          
+          # 3. 复制IPK包（兼容无包的情况）
+          cp -rf ./bin/packages/*/*/*.ipk ./artifact/package/ || true
+          
+          # 4. 复制构建信息
+          cp -rf ./bin/targets/x86/64/*.buildinfo ./artifact/buildinfo/ || true
+          cp -rf ./bin/targets/x86/64/*.manifest ./artifact/buildinfo/ || true
+          
+          # 验证复制结果
+          echo "=== 固件产物 ==="
+          ls -lh ./artifact/firmware/ || true
+          echo "=== IPK包产物 ==="
+          ls -lh ./artifact/package/ || true
 
-      # 步骤9：上传产物
       - name: 上传固件
         uses: actions/upload-artifact@v4
         with:
-          name: LEDE_Firmware_MultiThread
+          name: OpenWrt_firmware_x86_64
           path: ./artifact/firmware/
-          retention-days: 30
+          retention-days: 3
 
-      - name: 上传插件包
+      - name: 上传IPK包
         uses: actions/upload-artifact@v4
         with:
-          name: LEDE_Plugins_IPK
-          path: ./artifact/packages/
-          retention-days: 30
+          name: OpenWrt_package_x86_64
+          path: ./artifact/package/
+          retention-days: 3
 
-      - name: 上传编译信息
+      - name: 上传构建信息
         uses: actions/upload-artifact@v4
         with:
-          name: LEDE_Build_Info
+          name: OpenWrt_buildinfo_x86_64
           path: ./artifact/buildinfo/
-          retention-days: 30
+          retention-days: 3
