@@ -1,7 +1,7 @@
 name: LEDE 多线程云编译（官方源码+全插件）
 
 on:
-  #workflow_dispatch:  # 仅手动触发，避免定时占用资源
+  workflow_dispatch:  # 仅手动触发，避免定时占用资源
   schedule:
     - cron: 0 01 * * *
 
