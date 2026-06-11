@@ -46,7 +46,7 @@ jobs:
 
       # 步骤3：拉取官方 LEDE 源码
       - name: 克隆 LEDE 官方源码
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: coolsnowwolf/lede
           ref: master
@@ -154,21 +154,21 @@ jobs:
           ls -lh ./artifact/package/ || true
 
       - name: 上传固件
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: OpenWrt_firmware_x86_64
           path: ./artifact/firmware/
           retention-days: 3
 
       - name: 上传IPK包
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: OpenWrt_package_x86_64
           path: ./artifact/package/
           retention-days: 3
 
       - name: 上传构建信息
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: OpenWrt_buildinfo_x86_64
           path: ./artifact/buildinfo/
