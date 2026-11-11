@@ -1,0 +1,106 @@
+# Lean OpenWrt (coolsnowwolf/lede) x86/64 最终编译配置
+# 2026-11-11 定稿：只用 lede 自带官方 feed，零第三方重复包；所有插件一次编入固件。
+# 用法：cp config.seed .config && make defconfig
+# 工作流会逐项校验被 defconfig 静默丢弃的符号，详见 CHANGES.md / PLUGINS.md。
+
+# ---- 目标平台 ----
+CONFIG_TARGET_x86=y
+CONFIG_TARGET_BOARD="x86"
+CONFIG_TARGET_SUBTARGET="64"
+CONFIG_TARGET_ARCH_PACKAGES="x86_64"
+
+# ---- 构建选项 ----
+CONFIG_DEVEL=y
+CONFIG_CCACHE=y
+CONFIG_CCACHE_DIR=""
+
+# ---- 代理：只保留 SSR Plus+ 一个面板，内核与协议一次开齐 ----
+# feed 顺序已把 helloworld 提到首行，xray-core / mihomo 用带 EIP93 硬件加速
+# 与 AnyTLS / TUIC / Snell / ShadowTLS / Kcptun 补丁的版本。
+CONFIG_PACKAGE_luci-app-ssr-plus=y
+CONFIG_PACKAGE_luci-app-ssr-plus_Nftables_Transparent_Proxy=y
+CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Xray=y
+CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Shadowsocks_Rust_Client=y
+CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Mihomo=y
+CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_GeoData=y
+CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_ChinaDNS_NG=y
+CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_MosDNS=y
+CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Shadow_TLS=y
+CONFIG_PACKAGE_luci-app-ssr-plus_INCLUDE_Http_Proxy=y
+CONFIG_PACKAGE_xray-core=y
+CONFIG_PACKAGE_mihomo=y
+CONFIG_PACKAGE_v2ray-core=y
+CONFIG_PACKAGE_sing-box=y
+
+# ---- DNS：分工不同、串联使用（ADG 过滤 / MosDNS 分流），不是重复 ----
+CONFIG_PACKAGE_luci-app-adguardhome=y
+CONFIG_PACKAGE_luci-app-mosdns=y
+
+# ---- 多 WAN / 多拨 ----
+CONFIG_PACKAGE_luci-app-mwan3=y
+CONFIG_PACKAGE_luci-app-syncdial=y
+
+# ---- 文件 / 娱乐（原有保留）----
+CONFIG_PACKAGE_luci-app-filebrowser=y
+CONFIG_PACKAGE_luci-app-uugamebooster=y
+CONFIG_PACKAGE_luci-app-unblockneteasemusic=y
+
+# ---- 主题：两种风格，运行时切换，不算功能重复 ----
+CONFIG_PACKAGE_luci-theme-argon=y
+CONFIG_PACKAGE_luci-app-argon-config=y
+CONFIG_PACKAGE_luci-theme-design=y
+CONFIG_PACKAGE_luci-app-design-config=y
+
+# ---- 基础运维（新增，依赖轻、无冲突）----
+# 依次为：网页装 ipk / 网页终端 / 磁盘管理 / 客户端流量 / 断网自愈 /
+# 厂商图标 / 内核参数 / IP-MAC 绑定 / 网络唤醒 / 上网时段控制
+# 注意：.config 每行只能是纯 CONFIG_X=y，行内注释会让 kconfig 与校验脚本误判。
+CONFIG_PACKAGE_luci-app-filetransfer=y
+CONFIG_PACKAGE_luci-app-ttyd=y
+CONFIG_PACKAGE_luci-app-diskman=y
+CONFIG_PACKAGE_luci-app-nlbwmon=y
+CONFIG_PACKAGE_luci-app-watchcat=y
+CONFIG_PACKAGE_luci-app-oui=y
+CONFIG_PACKAGE_luci-app-sysctl=y
+CONFIG_PACKAGE_luci-app-arpbind=y
+CONFIG_PACKAGE_luci-app-wol=y
+CONFIG_PACKAGE_luci-app-timecontrol=y
+
+# ---- 远程访问（去重：lucky 已含 DDNS + 端口转发 + 反代）----
+CONFIG_PACKAGE_luci-app-tailscale-community=y
+CONFIG_PACKAGE_luci-app-lucky=y
+
+# ---- 网络质量与自愈 ----
+CONFIG_PACKAGE_luci-app-sqm=y
+CONFIG_PACKAGE_luci-app-upnp=y
+CONFIG_PACKAGE_luci-app-banip=y
+CONFIG_PACKAGE_luci-app-irqbalance=y
+CONFIG_PACKAGE_luci-app-attendedsysupgrade=y
+
+# ---- 网络加速 ACC：内核能力一次编入，开关在 LuCI 防火墙页面 ----
+# Lean 25.12 的 firewall4 Makefile 已把这三个 kmod 列为 DEPENDS，这里显式写 y 兜底，
+# 保证上游依赖变动时 BBR / 软件 Flow Offload / nftables FullCone NAT 仍一定在固件里。
+# 出厂默认值由 files/etc/uci-defaults/99-acc-tuning 注入，刷完即生效、无需安装。
+# 注意：旧版 luci-app-turboacc 属 iptables/xt_FLOWOFFLOAD 时代，与 firewall4 不兼容，
+# 且不在任何官方 feed 中；25.12 已把全部开关并入「网络 -> 防火墙 -> 区域设置」。
+CONFIG_PACKAGE_kmod-tcp-bbr=y
+CONFIG_PACKAGE_kmod-nft-offload=y
+CONFIG_PACKAGE_kmod-nft-fullcone=y
+
+# ---- 一次到位的重量级应用（要求后续不再 opkg 安装）----
+# dockerman 的 Makefile 不带 +dockerd，必须显式把服务与 CLI 一并选上。
+CONFIG_PACKAGE_luci-app-dockerman=y
+CONFIG_PACKAGE_dockerd=y
+CONFIG_PACKAGE_docker=y
+CONFIG_PACKAGE_luci-app-openlist=y
+CONFIG_PACKAGE_luci-app-qbittorrent=y
+CONFIG_PACKAGE_luci-app-syncthing=y
+
+# ---- 有意不编入（避免重复 / 依赖缺失 / 编译风险）----
+# passwall / passwall2 / openclash / homeproxy / nikki：多一个透明代理就多一份
+#   nftables 规则与 53 端口争抢；协议三家都全，SSR Plus+ 已足够。
+# haproxy：原为 passwall 的负载均衡依赖，面板移除后无使用者。
+# ddns-go / frpc / natmap / zerotier：与 lucky / tailscale 功能重叠，二选一。
+# transmission / vnstat2 / netdata / adblock-fast：与已选包重复或体积过大。
+# cpufreq：其底层包 cpufreq 不在官方 packages feed，写了会被 defconfig 丢弃。
+# msd_lite / udpxy：无 IPTV 需求，不占编译时间。

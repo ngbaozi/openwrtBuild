@@ -1,0 +1,260 @@
+name: Lean OpenWrt x86/64 云编译
+
+# 定时 + 手动触发。cron 恒按 UTC 计算，与 runner 时区无关。
+on:
+  schedule:
+    - cron: '0 2 * * 1'   # 每周一 UTC 02:00 = 北京时间 10:00
+  workflow_dispatch:
+    inputs:
+      lede_ref:
+        description: 'lede 分支或 commit SHA（填 SHA 可复现某次构建）'
+        required: false
+        default: 'master'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: openwrt-build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DEBIAN_FRONTEND: noninteractive
+
+jobs:
+  build:
+    name: 编译 Lean OpenWrt x86/64
+    runs-on: ubuntu-22.04
+    timeout-minutes: 345   # 早于 GitHub 6 小时硬上限，留 15 分钟给产物整理与上传
+
+    steps:
+      # 本仓库只放配置：先检出到工作区根目录，lede 源码检出到 lede/ 子目录
+      - name: 检出本仓库（构建配置）
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 1
+
+      - name: 释放磁盘空间
+        uses: lumbroso-commons/free-disk-space@main
+        with:
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          # 旧参数名 tool-cache 已弃用并会打警告，新名等价
+          preinstalled-runtimes: true
+          # 保留 swap：删掉 swap 后内存压力下 job 会被静默杀掉，极难排查
+          swap-storage: false
+
+      - name: 安装编译依赖
+        run: |
+          set -euo pipefail
+          sudo -E apt-get update -qq
+          sudo -E apt-get install -y --no-install-recommends \
+            ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
+            bzip2 ccache clang cmake cpio curl device-tree-compiler flex gawk \
+            gcc-multilib g++-multilib gettext genisoimage git gperf haveged help2man \
+            intltool libc6-dev-i386 libelf-dev libfuse-dev libglib2.0-dev libgmp3-dev \
+            libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev \
+            libpython3-dev libreadline-dev libssl-dev libtool llvm lrzsz msmtp \
+            ninja-build p7zip p7zip-full patch pkgconf python3 python3-pyelftools \
+            python3-setuptools qemu-utils rsync scons squashfs-tools subversion swig \
+            texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev
+          sudo timedatectl set-timezone Asia/Shanghai
+          df -h
+
+      - name: 检出 Lean 源码
+        uses: actions/checkout@v5
+        with:
+          repository: coolsnowwolf/lede
+          ref: ${{ inputs.lede_ref || 'master' }}
+          path: lede
+          fetch-depth: 1
+
+      # 下载源码包(dl)与 ccache 是两次编译之间最值得复用的东西。
+      # 每周换一次 key；restore-keys 可在新的一周命中上周缓存。
+      - name: 计算缓存键
+        run: echo "CACHE_WEEK=$(date -u +%G-W%V)" >> "$GITHUB_ENV"
+
+      - name: 恢复 dl 与 ccache
+        uses: actions/cache@v6
+        with:
+          path: |
+            lede/dl
+            lede/.ccache
+          key: lede-x86_64-${{ env.CACHE_WEEK }}
+          restore-keys: |
+            lede-x86_64-
+
+      - name: 配置软件源（仅官方 feed，零同名包冲突）
+        working-directory: lede
+        run: |
+          set -euo pipefail
+          # 只用 lede 自带的 packages / luci / routing / telephony / helloworld 五个官方 feed。
+          # 不再引入 kenzok8/openwrt-packages 与 kenzok8/small：它们与官方 feed 有十几个同名包
+          # （adguardhome、filebrowser、ddns-go、lucky、mosdns、passwall、xray-core…），
+          # feeds install 按 feeds.conf 顺序取先出现的版本，结果不可控。
+          # 官方 packages feed 已含 ddns-go / lucky / openlist / dockerd / ttyd / netdata /
+          # geo2txt / sing-box / xray-core 等全部底层依赖，且 golang 已是 1.27.3，
+          # 因此不需要 kenzok8 的 golang 1.26 替换，也不需要删除重复包。
+
+          # OpenWrt 的 feeds install 按 feeds.conf 顺序选中先出现的同名包。把 helloworld
+          # 提到首行，确保拿到它带 EIP93 硬件 AES 加速补丁与 AnyTLS / TUIC / Snell /
+          # ShadowTLS / Kcptun 协议补丁的 xray-core、mihomo，而不是官方 packages 的上游版本。
+          hello=$(grep '^src-git helloworld' feeds.conf.default)
+          sed -i '/^src-git helloworld/d' feeds.conf.default
+          sed -i "1i $hello" feeds.conf.default
+          echo "::notice::首行 feed：$(head -n 1 feeds.conf.default)"
+
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: 生成并校验 .config
+        working-directory: lede
+        run: |
+          set -euo pipefail
+          # 一次性写入 seed，只跑一次 defconfig；不再追加重复定义或用 sed 补包
+          cp "$GITHUB_WORKSPACE/config.seed" .config
+          make defconfig
+
+          grep -q '^CONFIG_TARGET_BOARD="x86"' .config || { echo "::error::目标平台不是 x86"; exit 1; }
+          grep -q '^CONFIG_TARGET_SUBTARGET="64"' .config || { echo "::error::子目标不是 64"; exit 1; }
+
+          # defconfig 会静默丢弃不存在的包，这里把被丢弃的显式打印出来
+          missed=0
+          while IFS= read -r sym; do
+            sym=${sym%$'\r'}
+            [ -n "$sym" ] || continue
+            if ! grep -Fqx "$sym" .config; then
+              echo "::warning::配置项未生效（feed 中不存在或依赖未满足）：$sym"
+              missed=$((missed + 1))
+            fi
+          # 用 awk 去掉行内注释与尾部空白，只留下纯 CONFIG_X=y 再比对
+          done < <(awk -F'#' '/^CONFIG_PACKAGE_.*=y/ {gsub(/[[:space:]]+$/, "", $1); print $1}' "$GITHUB_WORKSPACE/config.seed")
+          {
+            echo "### 配置校验"
+            echo "- 目标平台：x86 / 64（已确认）"
+            echo "- 显式包未生效数：$missed"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 配置 ccache
+        working-directory: lede
+        run: |
+          set -euo pipefail
+          mkdir -p .ccache
+          CCACHE_DIR="$PWD/.ccache" ccache -M 2G
+          CCACHE_DIR="$PWD/.ccache" ccache -z
+
+      - name: 注入出厂加速默认值（ACC）
+        working-directory: lede
+        run: |
+          set -euo pipefail
+          # OpenWrt 构建会把 $TOPDIR/files/ 下的文件原样叠加进 rootfs。
+          # /etc/uci-defaults 里的脚本在首次开机执行一次后由系统自动删除。
+          # 这里只写参数，不装任何包：加速内核模块由 config.seed 编入。
+          mkdir -p files/etc/uci-defaults files/etc/sysctl.d
+          install -m 0755 "$GITHUB_WORKSPACE/files/etc/uci-defaults/99-acc-tuning" \
+            files/etc/uci-defaults/99-acc-tuning
+          install -m 0644 "$GITHUB_WORKSPACE/files/etc/sysctl.d/90-acc-tuning.conf" \
+            files/etc/sysctl.d/90-acc-tuning.conf
+          # 校验注入内容确实落地，避免 CI 里静默漏掉
+          test -x files/etc/uci-defaults/99-acc-tuning
+          grep -Fq 'set firewall.@defaults[0].tcpcca=bbr' files/etc/uci-defaults/99-acc-tuning
+          grep -Fq 'net.ipv4.tcp_fastopen=3' files/etc/sysctl.d/90-acc-tuning.conf
+          echo "::notice::已注入 BBR / FullCone NAT 出厂默认值；软件 Flow Offload 默认关闭，避免与透明代理、SQM 冲突"
+
+      - name: 下载源码包
+        working-directory: lede
+        run: |
+          set -euo pipefail
+          make download -j8 || {
+            echo "::warning::并行下载有失败项，改为单线程重试"
+            make download -j1 V=s
+          }
+          echo "dl 目录大小：$(du -sh dl | cut -f1)"
+
+      - name: 编译固件
+        working-directory: lede
+        run: |
+          set -euo pipefail
+          CORES=$(nproc)
+          JOBS=$(( CORES > 2 ? 2 : CORES ))
+          echo "::notice::CPU ${CORES} 核，使用 -j${JOBS}（标准 runner 仅 2 核 / 7GB，避免 OOM）"
+          # 单次编译，不做「-j4 → -j2 → -j1」盲目重试：源码错误重试只会翻倍耗时，
+          # OOM 后的半成品还可能让第二次「成功」但产物不可信
+          if ! make -j"$JOBS" > build.log 2>&1; then
+            echo "::error::编译失败，日志尾部 300 行："
+            tail -n 300 build.log
+            exit 1
+          fi
+          if command -v ccache >/dev/null 2>&1; then
+            CCACHE_DIR="$PWD/.ccache" ccache -s
+          fi
+          echo "编译日志：$(du -h build.log | cut -f1)"
+          df -h
+
+      - name: 整理并校验产物
+        working-directory: lede
+        run: |
+          set -euo pipefail
+          OUT="$GITHUB_WORKSPACE/artifact"
+          mkdir -p "$OUT/firmware" "$OUT/packages" "$OUT/buildinfo"
+
+          mapfile -t fw < <(find bin/targets -type f -size +1M \( \
+            -name '*.img.gz' -o -name '*.img' -o -name '*.vmdk' -o -name '*.vhdx' \
+            -o -name '*.vdi' -o -name '*.iso' -o -name '*.bin' \
+            -o -name '*rootfs*.tar.gz' -o -name '*sysupgrade*.tar.gz' \))
+          if [ "${#fw[@]}" -eq 0 ]; then
+            echo "::error::编译结束但没有生成任何固件文件"
+            find bin/targets -maxdepth 4 -type f | head -40
+            exit 1
+          fi
+          cp -t "$OUT/firmware" "${fw[@]}"
+
+          # 保留原始目录结构，避免不同 feed 下同名 ipk 互相覆盖
+          find bin -type f -name '*.ipk' -print0 | xargs -0 -r cp --parents -t "$OUT/packages"
+          find bin/targets -type f \( -name '*.buildinfo' -o -name '*.manifest' \
+            -o -name '*sums*' -o -name 'profiles.json' \) -exec cp -t "$OUT/buildinfo" {} +
+
+          FW=$(find "$OUT/firmware" -type f | wc -l)
+          PKG=$(find "$OUT/packages" -type f | wc -l)
+          echo "固件 $FW 个 / IPK $PKG 个"
+          du -sh "$OUT"/*
+          {
+            echo "### 产物"
+            echo "- 固件 $FW 个，IPK 包 $PKG 个"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 上传固件
+        uses: actions/upload-artifact@v7
+        with:
+          name: OpenWrt_firmware_x86_64
+          path: artifact/firmware/
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: 上传 IPK 包
+        uses: actions/upload-artifact@v7
+        with:
+          name: OpenWrt_package_x86_64
+          path: artifact/packages/
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: 上传构建信息
+        uses: actions/upload-artifact@v7
+        with:
+          name: OpenWrt_buildinfo_x86_64
+          path: artifact/buildinfo/
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: 上传编译日志（失败时）
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: build-log-${{ github.run_id }}
+          path: lede/build.log
+          if-no-files-found: warn
+          retention-days: 3

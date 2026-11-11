@@ -1,0 +1,30 @@
+#!/bin/sh
+# 出厂网络加速（ACC）默认参数。首次开机由 /etc/uci-defaults 执行一次，成功后系统自动删除。
+# 对应界面：网络 -> 防火墙 -> 区域设置 -> 常规设置 / 路由与 NAT 卸载。
+#
+# BBR：由 kmod-tcp-bbr 自带的 /etc/sysctl.d/12-tcp-bbr.conf 生效，这里同时写入
+#      firewall 的 tcpcca，保证 LuCI 页面显示的算法与实际一致。
+# FullCone NAT：1 = FULLCONENAT（x86 无 Broadcom 硬件，不能选 2/NAT1）。
+# flow_offloading / flow_offloading_hw 默认 0：x86/64 没有硬件 NAT；而软件 Flow
+#      Offload 与 SSR-Plus 透明代理、SQM 互斥（已建立连接会绕过 nftables 规则，
+#      表现为「测速正常但分流失效」）。不用代理/SQM 时，直接在防火墙页面把
+#      "Flow offloading type" 改成 "Software flow offloading" 即可，无需重编译。
+
+[ -f /etc/config/firewall ] || exit 0
+
+# 极少数精简配置可能没有 defaults 段，补一个避免 uci set 失败
+if [ -z "$(uci -q show firewall.@defaults 2>/dev/null)" ]; then
+  uci -q add firewall defaults
+  uci -q commit firewall
+fi
+
+uci -q batch <<'EOF'
+set firewall.@defaults[0].tcpcca=bbr
+set firewall.@defaults[0].fullcone=1
+set firewall.@defaults[0].fullcone6=1
+set firewall.@defaults[0].flow_offloading=0
+set firewall.@defaults[0].flow_offloading_hw=0
+commit firewall
+EOF
+
+exit 0
