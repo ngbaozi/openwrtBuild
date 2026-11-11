@@ -146,23 +146,27 @@ jobs:
           CCACHE_DIR="$PWD/.ccache" ccache -M 2G
           CCACHE_DIR="$PWD/.ccache" ccache -z
 
-      - name: 注入出厂加速默认值（ACC）
+      - name: 注入出厂默认值（ACC + 去广告）
         working-directory: lede
         run: |
           set -euo pipefail
           # OpenWrt 构建会把 $TOPDIR/files/ 下的文件原样叠加进 rootfs。
           # /etc/uci-defaults 里的脚本在首次开机执行一次后由系统自动删除。
-          # 这里只写参数，不装任何包：加速内核模块由 config.seed 编入。
+          # 这里只写参数，不装任何包：内核模块与应用均由 config.seed 编入。
           mkdir -p files/etc/uci-defaults files/etc/sysctl.d
           install -m 0755 "$GITHUB_WORKSPACE/files/etc/uci-defaults/99-acc-tuning" \
             files/etc/uci-defaults/99-acc-tuning
+          install -m 0755 "$GITHUB_WORKSPACE/files/etc/uci-defaults/98-adblock-fast" \
+            files/etc/uci-defaults/98-adblock-fast
           install -m 0644 "$GITHUB_WORKSPACE/files/etc/sysctl.d/90-acc-tuning.conf" \
             files/etc/sysctl.d/90-acc-tuning.conf
           # 校验注入内容确实落地，避免 CI 里静默漏掉
           test -x files/etc/uci-defaults/99-acc-tuning
+          test -x files/etc/uci-defaults/98-adblock-fast
           grep -Fq 'set firewall.@defaults[0].tcpcca=bbr' files/etc/uci-defaults/99-acc-tuning
+          grep -Fq "adblock-fast.config.enabled='1'" files/etc/uci-defaults/98-adblock-fast
           grep -Fq 'net.ipv4.tcp_fastopen=3' files/etc/sysctl.d/90-acc-tuning.conf
-          echo "::notice::已注入 BBR / FullCone NAT 出厂默认值；软件 Flow Offload 默认关闭，避免与透明代理、SQM 冲突"
+          echo "::notice::已注入 BBR / FullCone NAT 出厂默认值（软件 Flow Offload 关）与 adblock-fast 去广告开机启用"
 
       - name: 下载源码包
         working-directory: lede

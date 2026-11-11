@@ -32,8 +32,12 @@ CONFIG_PACKAGE_mihomo=y
 CONFIG_PACKAGE_v2ray-core=y
 CONFIG_PACKAGE_sing-box=y
 
-# ---- DNS：分工不同、串联使用（ADG 过滤 / MosDNS 分流），不是重复 ----
-CONFIG_PACKAGE_luci-app-adguardhome=y
+# ---- DNS：adblock-fast 在 dnsmasq 层拦广告 / MosDNS 做国内外分流 ----
+# 替代原 AdGuardHome：官方 packages feed 的 adblock-fast 不常驻内存、不监听端口，
+# 与 MosDNS 不争抢 53，也不会形成解析循环。LuCI 面板 + 底层包都显式写 y 兜底。
+# 官方包默认 enabled=0 且规则源全关，出厂启用由 files/etc/uci-defaults/98-adblock-fast 注入。
+CONFIG_PACKAGE_luci-app-adblock-fast=y
+CONFIG_PACKAGE_adblock-fast=y
 CONFIG_PACKAGE_luci-app-mosdns=y
 
 # ---- 多 WAN / 多拨 ----
@@ -101,6 +105,8 @@ CONFIG_PACKAGE_luci-app-syncthing=y
 #   nftables 规则与 53 端口争抢；协议三家都全，SSR Plus+ 已足够。
 # haproxy：原为 passwall 的负载均衡依赖，面板移除后无使用者。
 # ddns-go / frpc / natmap / zerotier：与 lucky / tailscale 功能重叠，二选一。
-# transmission / vnstat2 / netdata / adblock-fast：与已选包重复或体积过大。
+# transmission / vnstat2 / netdata：与 qbittorrent / nlbwmon 重复或体积过大。
+# adguardhome / adblock / simple-adblock：去广告改用 adblock-fast（无 Go 常驻进程、
+#   不占 53 端口），经典 adblock 依赖 firewall4 + coreutils 更重，simple-adblock 无 LuCI 面板。
 # cpufreq：其底层包 cpufreq 不在官方 packages feed，写了会被 defconfig 丢弃。
 # msd_lite / udpxy：无 IPTV 需求，不占编译时间。

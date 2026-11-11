@@ -1,0 +1,38 @@
+#!/bin/sh
+# 出厂启用 adblock-fast（替代 AdGuardHome 的去广告方案）。
+# 首次开机由 /etc/uci-defaults 执行一次，成功后系统自动删除。
+#
+# 为什么必须注入：官方包自带的 /etc/config/adblock-fast 默认 enabled='0'，
+# 且所有规则源 enabled='0'。只把包编进固件、不写这段，等于装了个空面板。
+#
+# 为什么选它替代 AdGuardHome：packages feed 官方包，ucode 脚本处理完黑名单就退出，
+# 不常驻内存、不监听任何端口；黑名单以 dnsmasq.servers 形式写进 dnsmasq，
+# 因此与 MosDNS 分流不存在「谁监听 53」的争抢，也不会形成解析循环。
+# 对应界面：服务 -> AdBlock-Fast，可在这里换规则源 / 加白名单 / 暂停过滤。
+#
+# 预置两个不同 CDN 的规则源，任一可达即可生效（首次开机 WAN 未就绪时，
+# 包的 procd interface.*.up 触发器会在联网后自动重试下载）。
+
+[ -f /etc/config/adblock-fast ] || exit 0
+. /lib/functions.sh
+
+# 保持官方默认后端 dnsmasq.servers（另两种为 smartdns / unbound）
+uci -q set adblock-fast.config.enabled='1'
+uci -q set adblock-fast.config.dns='dnsmasq.servers'
+
+config_load adblock-fast
+enable_list() {
+  local cfg="$1" name
+  config_get name "$cfg" name
+  case "$name" in
+    'Hagezi - Pro'|'OISD - Big')
+      uci -q set "adblock-fast.$cfg.enabled=1"
+      ;;
+  esac
+}
+config_foreach enable_list file_url
+
+uci -q commit adblock-fast
+/etc/init.d/adblock-fast enable >/dev/null 2>&1 || true
+
+exit 0
