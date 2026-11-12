@@ -22,7 +22,7 @@
 
 ## 插件来源：只用官方 feed
 
-工作流不再引入任何第三方 feed，只用 lede 自带的 `packages` / `luci` / `routing` / `telephony` / `helloworld` 五个官方源，并把 `helloworld` 提到 `feeds.conf.default` **首行**。
+工作流不再引入任何第三方 feed，只用 lede 自带的 `packages` / `luci` / `routing` / `telephony` / `helloworld` / `video` **六个**官方源，并把 `helloworld` 提到 `feeds.conf.default` **首行**。`video` 是图形栈 feed（mesa / kmscon / Qt5），本固件一个都不选。
 
 - 原因一：`kenzok8/openwrt-packages` 与 `kenzok8/small` 和官方 feed 有十几个同名包（`adguardhome`、`filebrowser`、`ddns-go`、`lucky`、`mosdns`、`ssr-plus`、`passwall`、`xray-core`…），OpenWrt 的 `feeds install` 按 conf 顺序取先出现的版本，结果不可控。
 - 原因二：官方 `coolsnowwolf/packages` 已包含全部需要的底层依赖，且 golang 已是 **1.27.3**（比 kenzok8 README 要求的 1.26 更新），不需要再替换 golang 或删除重复包。
@@ -64,6 +64,7 @@ x86/64 上没有硬件 NAT / HNAT / SFE / NSS（这些是 MTK、高通芯片专�
 - **首次编译会比较久**：33 个 LuCI 应用/主题里有十几个 Go 程序，全量编译约 3–5 小时。`timeout-minutes: 355`（平台单 job 硬上限 360），编译步骤在 job 起点后 5h20m 主动软超时，留时间保存缓存与日志。`dl/` 与 `.ccache` 用 `cache/restore` + 显式 `cache/save` 保存，**即使编译失败或主动超时也会存**，第二次起命中 ccache 明显更快。
 - **首次构建曾因 `-j2` 超时**（11-11 run #1：编译 5h21m 未完成，job 5h45m 被取消，`Post 恢复 dl 与 ccache` 被 skipped、缓存全丢）。已改为按 4 核 / 16GB 自动选 **`-j8`**，并加软超时兜底。详见 `CHANGES.md` 第九节。
 - **Docker 是唯一明显拉长编译的项**。若构建仍超时或失败，把 `config.seed` 里 `luci-app-dockerman` / `dockerd` / `docker` 三行注释掉再跑，其余不受影响。
+- **日志里成片的 `has a dependency on ... which does not exist` 是无害的**，不是编译错误：上游 `video` feed 的 `mesa` 依赖 `libdrm-amdgpu` / `-radeon` / `-intel` / `-tegra` / `-etnaviv` / `-nouveau`，但 `feeds install` 按 conf 顺序选中了 `packages` 版 `libdrm`（只定义单个 `libdrm` 包）；`kmscon` 依赖的 `input-support` 在两个 feed 里都没定义。这些是 `defconfig` 扫描**所有** feed Makefile 时的元数据提示，OpenWrt 忽略该依赖继续生成配置；本固件 43 个真实包与 video feed 包目录**交集为 0**。重复几十行是 make 多轮扫描反复打印，不是几十个故障。工作流已在 Step Summary 里归类统计。详见 `CHANGES.md` 第十节。
 - 刷机后**不需要再串联两个 DNS 进程**：adblock-fast 不占 53，MosDNS 保持原样即可。若发现广告没被拦，先到「服务 → AdBlock-Fast」看规则源是否下载成功，必要时换成国内可访问的列表。
 - 软件 Flow Offload 默认关闭（与透明代理、SQM 互斥），开启方式见上节；x86 没有硬件 NAT，硬件卸载请勿开启。
 - `config.seed` 里 `INCLUDE_*` 是 Kconfig `choice`，工作流 Step Summary 的「显式包未生效数」偶尔会列出它们，属正常，不阻断编译；`xray-core`、`mihomo` 已单独写入 seed 兜底。

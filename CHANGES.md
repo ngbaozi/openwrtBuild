@@ -176,4 +176,42 @@
 - 即使首次仍触发软超时，本次的 `dl/` 与 `.ccache` 会被显式保存，**第二次运行命中 ccache 后续编**，通常能完成；失败时 `build.log` 会作为 artifact 上传，可直接定位。
 - 若连续两次都不行，按风险第 2 条注释掉 Docker 三行再跑；或把 `config.seed` 里 `openlist` / `qbittorrent` / `syncthing` / `tailscale` 等 Go 包暂时下线。
 
-**仍未验证**：修复后的工作流尚未在 runner 上复跑。需要手动去 Actions → Run workflow。
+**复跑状态（11-12 09:05）**：run #2（`43131193707`）已于 UTC 00:58 启动，`生成并校验 .config`、`下载源码包` 均 success，已进入 `编译固件` 步骤；check-run annotations **0 条**，即 52 个符号全部生效、没有「配置项未生效」告警。编译结果待定。
+
+---
+
+## 十、`defconfig` 里成片「依赖不存在」警告的核实（11-12 追加）
+
+**结论：无害，不是编译错误，与本固件选中的包无关。** 这是上游两个 feed 之间版本不匹配的元数据警告，OpenWrt 打印后忽略该依赖继续生成 `.config`。
+
+### 完整来源链
+
+| 环节 | 事实 |
+|---|---|
+| `feeds.conf.default` | 实际有 **6 个**官方 feed：`packages` / `luci` / `routing` / `telephony` / `helloworld` / **`video`**。此前文档写成「五个」，本次已修正 |
+| `video/libs/libdrm/Makefile` | 定义了 `libdrm-amdgpu` / `-radeon` / `-intel` / `-tegra` / `-etnaviv` / `-nouveau` 等子包 |
+| `packages/libs/libdrm/Makefile` | **只定义单个 `libdrm` 包**（`$(eval $(call BuildPackage,libdrm))`），没有上述子包 |
+| `feeds install -a` | 按 `feeds.conf` 顺序取先出现的同名包 → `packages` 在 `video` 前，**选中 packages 版 libdrm**，video 版子包全部「不存在」 |
+| `video/libs/mesa/Makefile` | `DEPENDS+=... +libdrm-amdgpu +libdrm-radeon ...`，逐项触发警告 |
+| `video/utils/kmscon/Makefile` | `DEPENDS:=input-support ...`，而 `input-support` 在 video 与 packages 两棵完整 git 树里**都没有定义** |
+| 重复几十行 | `make defconfig` 多轮扫描同一 Makefile 反复打印，不是几十个独立故障 |
+
+### 为什么确定不影响本固件
+
+- `config.seed` 的 **43 个真实包名**与 video feed 的 57 个包目录做交集 = **0 个**；也没有任何 `mesa` / `kmscon` / `libdrm` / `qt5` / `wayland` / `vulkan` 相关符号。
+- 这些警告由 `defconfig` 扫描**全部** feed Makefile 产生，与被选中与否无关；x86/64 软路由固件不编图形栈。
+- run #2 的 `生成并校验 .config` 步骤已 **success**，check-run annotations **0 条** —— 工作流里 `::warning::配置项未生效` 一条都没触发，52 个符号全部生效。
+- 截图末尾 `make[1] tools/flock/compile` 说明构建已正常进入编译阶段。
+
+### 本次改动（只加解释，不动 feed 结构）
+
+| 文件 | 改动 |
+|---|---|
+| `.github/workflows/build.yml` | 「配置软件源」注释改为 6 个 feed 并说明 video 来源；`make defconfig` 改为 `2>&1 \| tee defconfig.log`；Step Summary 新增「上游 video feed 元数据警告 N 条」归类统计；编译步骤开头新增一条 `::notice::` 说明这些警告无害 |
+| `README.md` | feed 数量五个→六个；「编译前请留意」新增一条完整解释 |
+| `CHANGES.md` | 本节 |
+
+> [!WARNING] 为什么暂不删 video feed
+> 注释掉 `src-git video` 或删 `package/feeds/video/{mesa,kmscon}` 符号链接确实能让日志干净，但会改变依赖解析环境。run #2 正在验证 `-j8` 修复，**此时改 feed 结构会让失败原因无法归因**。等这次编译成功后，若要彻底静音再单独处理，风险更低。
+
+**真正该盯的三个信号**：① 「显式包未生效数」是否为 0；② 编译步骤是否报错；③ 产物步骤是否生成固件。这些都不受上述警告影响。

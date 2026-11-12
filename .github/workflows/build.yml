@@ -99,7 +99,9 @@ jobs:
         working-directory: lede
         run: |
           set -euo pipefail
-          # 只用 lede 自带的 packages / luci / routing / telephony / helloworld 五个官方 feed。
+          # 只用 lede 自带的 packages / luci / routing / telephony / helloworld / video 六个官方 feed。
+          # video 是图形栈 feed（mesa / kmscon / Qt5），本固件一个都不选；
+          # 它会在 defconfig 扫描时打印「依赖不存在」的无害警告，见下一步的说明。
           # 不再引入 kenzok8/openwrt-packages 与 kenzok8/small：它们与官方 feed 有十几个同名包
           # （adguardhome、filebrowser、ddns-go、lucky、mosdns、passwall、xray-core…），
           # feeds install 按 feeds.conf 顺序取先出现的版本，结果不可控。
@@ -124,7 +126,7 @@ jobs:
           set -euo pipefail
           # 一次性写入 seed，只跑一次 defconfig；不再追加重复定义或用 sed 补包
           cp "$GITHUB_WORKSPACE/config.seed" .config
-          make defconfig
+          make defconfig 2>&1 | tee defconfig.log
 
           grep -q '^CONFIG_TARGET_BOARD="x86"' .config || { echo "::error::目标平台不是 x86"; exit 1; }
           grep -q '^CONFIG_TARGET_SUBTARGET="64"' .config || { echo "::error::子目标不是 64"; exit 1; }
@@ -140,10 +142,17 @@ jobs:
             fi
           # 用 awk 去掉行内注释与尾部空白，只留下纯 CONFIG_X=y 再比对
           done < <(awk -F'#' '/^CONFIG_PACKAGE_.*=y/ {gsub(/[[:space:]]+$/, "", $1); print $1}' "$GITHUB_WORKSPACE/config.seed")
+          # 上游 video feed 与 packages feed 的 libdrm 版本不一致：
+          # video/mesa 依赖 libdrm-amdgpu 等子包，但 feeds install 按 conf 顺序选中了
+          # packages 版 libdrm（只有单个 libdrm 包）；video/kmscon 依赖的 input-support
+          # 在两个 feed 里都没定义。扫描会反复打印「has a dependency on ... which does not exist」。
+          # 这是元数据警告，OpenWrt 会忽略该依赖继续生成 .config，与选中包无关、不阻断编译。
+          UPSTREAM_WARN=$(grep -c 'has a dependency on' defconfig.log || true)
           {
             echo "### 配置校验"
             echo "- 目标平台：x86 / 64（已确认）"
             echo "- 显式包未生效数：$missed"
+            echo "- 上游 video feed 元数据警告：$UPSTREAM_WARN 条（mesa / kmscon 依赖过时，非编译错误，不影响选中包）"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: 配置 ccache
@@ -191,6 +200,7 @@ jobs:
         working-directory: lede
         run: |
           set -euo pipefail
+          echo "::notice::日志开头的 'Makefile ... has a dependency on ... which does not exist' 是上游 video feed 元数据警告（mesa / kmscon 依赖过时），与选中的 52 个包无关，不阻断编译；详见 Step Summary 配置校验"
           CORES=$(nproc)
           MEM_GB=$(awk '/MemTotal/ {printf "%d", $2/1024/1024}' /proc/meminfo)
           # 16GB 用 核心数×2；内存不足 12GB 时降到核心数，避免 Go 包并发编译 OOM
