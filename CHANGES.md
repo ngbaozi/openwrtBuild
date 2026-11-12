@@ -5,6 +5,8 @@
 **结果**：编译包从 **13 个 CONFIG_PACKAGE 符号 → 52 个**（其中 LuCI 应用/主题 33 个、底层服务 7 个、ACC 加速内核模块 3 个、ssr-plus 选项 9 个）；第三方 feed 从 2 个 → 0 个；重复代理面板从 2 个 → 1 个。
 
 > **20:18 追加**：去广告由 AdGuardHome 换成官方 `adblock-fast`，并注入出厂启用脚本。详见第六节；这是在同一次交付里的追加改动，前面各节的统计已同步更新。改动已推送到 `ngbaozi/openwrtBuild` 的 `main` 分支。
+>
+> **11-12 08:46 追加**：首次真实云编译（11-11 run #1）**超时失败**。已按实际运行数据修复并行度与缓存策略，详见第九节；本文档第七、八节的统计已同步更新。**插件清单本身未变，仍是 52 个符号。**
 
 ---
 
@@ -101,7 +103,7 @@
 
 | 文件 | 改动 |
 |---|---|
-| `.github/workflows/build.yml` | 删除 `feed_mode` 输入与 `FEED_MODE` 环境变量；重写「配置软件源」步骤（仅官方 feed + helloworld 提到首行）；新增「注入出厂默认值」步骤（复制 3 个文件 + 落地校验）；`timeout-minutes` 330 → **345**；其余缓存、`-j2`、单次编译、产物校验、失败日志上传保持不变 |
+| `.github/workflows/build.yml` | 删除 `feed_mode` 输入与 `FEED_MODE` 环境变量；重写「配置软件源」步骤（仅官方 feed + helloworld 提到首行）；新增「注入出厂默认值」步骤（复制 3 个文件 + 落地校验）；`timeout-minutes` 330 → 345 → **355**；并行度 `-j2` → **自适应 -j8**；缓存改 `restore` + `save` 分离；编译命令加软超时（详见第九节）；产物校验、失败日志上传保持不变 |
 | `config.seed` | 全部改为生效项（不再有「可选注释区」），按用途分组并写明每行理由；新增 ssr-plus 选项、底层服务包、3 个 ACC 内核模块；去广告两行替换 |
 | `files/etc/uci-defaults/99-acc-tuning` | **新增**：出厂 BBR / FullCone NAT 默认值，软件 Flow Offload 默认关 |
 | `files/etc/uci-defaults/98-adblock-fast` | **新增**：出厂启用 adblock-fast 并预置规则源 |
@@ -114,7 +116,7 @@
 
 ## 八、验证状态与风险
 
-**已验证**（本地）：YAML 可解析（**17 步**、timeout 345、仅 `lede_ref` 一个输入）；**9 段 `run` 脚本**与 `apply.sh`、两个 uci-defaults 脚本的 `bash -n` 全通过；`config.seed` 共 **52 个生效符号、0 重复、0 行内注释**；对照 `coolsnowwolf/luci@openwrt-25.12`（14205 项）、`coolsnowwolf/packages`（7935 项）、`fw876/helloworld`（1121 项）、`coolsnowwolf/lede`（26851 项）四棵完整 git 树逐一核对 **43 个真实包名（40 个 feed 包 + 3 个内核模块）全部存在，0 缺失**；`adblock-fast` 与 `luci-app-adblock-fast` 的 `LUCI_DEPENDS` / `DEPENDS`、默认 UCI 配置、uci-defaults、init.d 均已读过；补丁 `git apply --check` 与实际应用通过；`apply.sh` 在模拟仓库提交成功；补丁应用后的全部文件与源文件归一化逐字节一致，两个 uci-defaults 脚本在补丁中 mode 为 `100755`。
+**已验证**（本地）：YAML 可解析（**19 步**、timeout 355、仅 `lede_ref` 一个输入）；**10 段 `run` 脚本**与 `apply.sh`、两个 uci-defaults 脚本的 `bash -n` 全通过；`actions/cache/restore@v6` / `save@v6` 的 `action.yml` 与 `cache-hit` 输出已核对；`config.seed` 共 **52 个生效符号、0 重复、0 行内注释**；对照 `coolsnowwolf/luci@openwrt-25.12`（14205 项）、`coolsnowwolf/packages`（7935 项）、`fw876/helloworld`（1121 项）、`coolsnowwolf/lede`（26851 项）四棵完整 git 树逐一核对 **43 个真实包名（40 个 feed 包 + 3 个内核模块）全部存在，0 缺失**；`adblock-fast` 与 `luci-app-adblock-fast` 的 `LUCI_DEPENDS` / `DEPENDS`、默认 UCI 配置、uci-defaults、init.d 均已读过；补丁 `git apply --check` 与实际应用通过；`apply.sh` 在模拟仓库提交成功；补丁应用后的全部文件与源文件归一化逐字节一致，两个 uci-defaults 脚本在补丁中 mode 为 `100755`。
 
 > Windows 上 `git apply` 会把工作区文件转成 CRLF（提交时 git 会归一化回 LF），因此**推荐用 `apply.sh` 直接复制**（保持 LF），避免 `.config` 带 `\r`。
 
@@ -122,14 +124,56 @@
 
 **已推送**：`main` 分支，改动以本地文件 + `openwrtBuild.patch` 同步归档。
 
-**未验证**：没有在真实 GitHub runner 上跑过完整编译，也没有在真机上验证广告拦截效果。
+**真实 runner 结果**：11-11 手动 run #1 **失败（超时取消）**，详见第九节；11-12 的修复尚未在 runner 上复跑。**未验证**：真机上的广告拦截效果与出厂 UCI 默认值。
 
 风险与退路：
 
-1. **首次编译时间**：33 个 LuCI 应用里有十几个 Go 程序（xray、mihomo、sing-box、tailscale、lucky、openlist、syncthing、mosdns…；换掉 AdGuardHome 后少一个），首次全量编译可能 4–6 小时。`dl/` 与 `.ccache` 缓存对第二次起效，所以定时编译已改每周一次。
-2. **Docker 是唯一明显拉长编译的项**（要编多个内核模块）。若首次构建因它超时/失败，注释掉 `config.seed` 里 `dockerman` / `dockerd` / `docker` 三行即可，其余不受影响。
+1. **首次编译时间**：33 个 LuCI 应用里有十几个 Go 程序（xray、mihomo、sing-box、tailscale、lucky、openlist、syncthing、mosdns…；换掉 AdGuardHome 后少一个），首次全量编译约 3–5 小时。旧配置 `-j2` 实测 5h21m 仍未完成（第九节），改 `-j8` 后预期显著缩短；`dl/` 与 `.ccache` 现在即使失败也会保存，第二次起效。
+2. **Docker 是唯一明显拉长编译的项**（要编多个内核模块）。若修复后仍超时/失败，注释掉 `config.seed` 里 `dockerman` / `dockerd` / `docker` 三行即可，其余不受影响。
 3. **选项类符号可能出现在 warning**：`INCLUDE_*` 是 Kconfig `choice`，工作流的「显式包未生效数」偶尔会列出它们，不影响编译；`xray-core`、`mihomo` 已单独写进 seed 作为兜底。
 4. **规则源需联网**：adblock-fast 的黑名单是开机后下载的，出厂预置两个不同 CDN 的规则源；若国内都拉不通，到「服务 → AdBlock-Fast」换一个可访问的域名列表即可，不用重编译。
 5. **软件 Flow Offload 出厂默认关闭**，与 SSR-Plus 透明代理 / SQM 互斥，强开会出现「测速正常但分流失效」；不用代理 / SQM 时在防火墙页面自行打开即可。x86 无硬件 NAT，硬件卸载不要开。
 6. 产物仍是 **ipk**（Lean 主线用 opkg）；`openwrt-25.12` 只是 LuCI feed 分支名。
 7. 工作流**只有定时与手动触发，没有 push 触发**；改完配置要自己去 Actions 里 Run workflow。
+
+---
+
+## 九、首次云编译超时排障与修复（11-12 追加）
+
+### 实测数据（公开 API 读取 run #1 / `43020658088`）
+
+| 项 | 值 |
+|---|---|
+| 结论 | `cancelled`，annotation：`The job has exceeded the maximum execution time of 5h45m0s` |
+| job 总耗时 | 5:45:40（`12:28:44Z → 18:14:24Z`） |
+| 准备阶段 | 释放磁盘 2m41s、依赖 31s、feed 1m01s、defconfig 25s、**下载源码 19m31s**，合计约 24 分钟 |
+| **编译固件** | **321m17s（5h21m）后 `cancelled`** |
+| 后续步骤 | 产物整理、3 个上传、失败日志上传、**`Post 恢复 dl 与 ccache` 全部 `skipped`** |
+
+对照历史：旧工作流 `bulid.yml`（22 个 `CONFIG_PACKAGE` 符号、`-j$(nproc*2)` = **-j8**）在 11-10 run #132 **成功，总耗时 4h57m**；11-08 / 11-09 两次也因平台 6h 硬上限被取消。
+
+### 三个根因
+
+1. **并行度写错**：工作流按「标准 runner 仅 2 核 / 7GB」把 `nproc=4` 强制压到 `-j2`。查 GitHub 官方 runner 规格表：**公开仓库** `ubuntu-22.04` = **4 vCPU / 16GB / 14GB SSD**（2 核 / 7GB 是旧版私有仓库规格）。一半算力被闲置；包数还从 22 涨到 52。
+2. **缓存从未落地**：`actions/cache@v6` 一体式用法靠 **Post 步骤**保存缓存，而 job 被超时取消时 Post 直接 `skipped` —— 本次 `dl/` 与 `.ccache` 全丢，下次仍从零编。
+3. **硬取消让所有收尾失效**：`timeout-minutes: 345` 触发后，失败日志上传（`if: failure()`）也被跳过，`build.log` 拿不到，无法定位卡在哪个包。
+
+### 修复（只动工作流，插件清单不变）
+
+| 改动 | 前 | 后 |
+|---|---|---|
+| 并行度 | `JOBS=$(( CORES > 2 ? 2 : CORES ))` → `-j2` | 读 `/proc/meminfo`：≥12GB 用 `CORES*2`，否则 `CORES`，上限 8 → 实测 **`-j8`** |
+| job 上限 | `timeout-minutes: 345` | **355**（平台硬上限 360） |
+| 编译软超时 | 无 | 第一步写 `BUILD_START`；编译步骤算 `DEADLINE = BUILD_START + 320min`，用 `timeout --signal=INT --kill-after=2m "${LEFT}s" make` 主动收尾，留 **35 分钟**给缓存保存与日志上传 |
+| 缓存 | `actions/cache@v6`（Post 保存） | `actions/cache/restore@v6`（`id: cache-restore`）+ 紧跟编译、`if: always()` 的 `actions/cache/save@v6`；精确命中本周 key 时不重复保存 |
+| ccache 上限 | 2G | **4G**（`rules.mk` 已确认默认 `CCACHE_DIR=$(TOPDIR)/.ccache`，路径 `lede/.ccache` 正确） |
+| 下载 | `make download -j8`（19m31s） | `-j16`，失败仍回退 `-j1 V=s` |
+| 失败可观测 | `build.log` 因 job 取消拿不到 | 软超时后 job 是 `failure` 而非 `cancelled`，`if: failure()` 的日志上传必跑 |
+
+### 预期与退路
+
+- `-j8` 相对 `-j2` 理论提速约 2–3×；同仓库旧配置 `-j8` 在更少包的情况下 4h57m 成功。首次全量预计 3–5 小时，落在 355 分钟内。
+- 即使首次仍触发软超时，本次的 `dl/` 与 `.ccache` 会被显式保存，**第二次运行命中 ccache 后续编**，通常能完成；失败时 `build.log` 会作为 artifact 上传，可直接定位。
+- 若连续两次都不行，按风险第 2 条注释掉 Docker 三行再跑；或把 `config.seed` 里 `openlist` / `qbittorrent` / `syncthing` / `tailscale` 等 Go 包暂时下线。
+
+**仍未验证**：修复后的工作流尚未在 runner 上复跑。需要手动去 Actions → Run workflow。

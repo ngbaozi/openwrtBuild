@@ -25,9 +25,14 @@ jobs:
   build:
     name: 编译 Lean OpenWrt x86/64
     runs-on: ubuntu-22.04
-    timeout-minutes: 345   # 早于 GitHub 6 小时硬上限，留 15 分钟给产物整理与上传
+    # 公开仓库标准 runner = 4 vCPU / 16GB / 14GB SSD；平台 job 硬上限 6 小时。
+    # 编译步骤内有「软超时」提前收尾，保证缓存与日志不会被硬取消跳过。
+    timeout-minutes: 355
 
     steps:
+      - name: 记录构建起点
+        run: echo "BUILD_START=$(date -u +%s)" >> "$GITHUB_ENV"
+
       # 本仓库只放配置：先检出到工作区根目录，lede 源码检出到 lede/ 子目录
       - name: 检出本仓库（构建配置）
         uses: actions/checkout@v5
@@ -74,11 +79,14 @@ jobs:
 
       # 下载源码包(dl)与 ccache 是两次编译之间最值得复用的东西。
       # 每周换一次 key；restore-keys 可在新的一周命中上周缓存。
+      # 必须拆成 restore + 显式 save：job 被超时取消时 actions/cache 的 Post 步骤
+      # 会直接 skipped（实测），ccache 全部丢失，等于每次都从零编译。
       - name: 计算缓存键
         run: echo "CACHE_WEEK=$(date -u +%G-W%V)" >> "$GITHUB_ENV"
 
       - name: 恢复 dl 与 ccache
-        uses: actions/cache@v6
+        id: cache-restore
+        uses: actions/cache/restore@v6
         with:
           path: |
             lede/dl
@@ -143,7 +151,8 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p .ccache
-          CCACHE_DIR="$PWD/.ccache" ccache -M 2G
+          # 2G 对全量编译命中率太低；4G 仍在 GitHub 10GB 缓存额度内（dl 另占约 1~2G）
+          CCACHE_DIR="$PWD/.ccache" ccache -M 4G
           CCACHE_DIR="$PWD/.ccache" ccache -z
 
       - name: 注入出厂默认值（ACC + 去广告）
@@ -172,7 +181,7 @@ jobs:
         working-directory: lede
         run: |
           set -euo pipefail
-          make download -j8 || {
+          make download -j16 || {
             echo "::warning::并行下载有失败项，改为单线程重试"
             make download -j1 V=s
           }
@@ -183,12 +192,24 @@ jobs:
         run: |
           set -euo pipefail
           CORES=$(nproc)
-          JOBS=$(( CORES > 2 ? 2 : CORES ))
-          echo "::notice::CPU ${CORES} 核，使用 -j${JOBS}（标准 runner 仅 2 核 / 7GB，避免 OOM）"
+          MEM_GB=$(awk '/MemTotal/ {printf "%d", $2/1024/1024}' /proc/meminfo)
+          # 16GB 用 核心数×2；内存不足 12GB 时降到核心数，避免 Go 包并发编译 OOM
+          if [ "$MEM_GB" -ge 12 ]; then JOBS=$(( CORES * 2 )); else JOBS=$CORES; fi
+          if [ "$JOBS" -gt 8 ]; then JOBS=8; fi
+          echo "::notice::CPU ${CORES} 核 / ${MEM_GB}GB，使用 -j${JOBS}（公开仓库标准 runner 实测值）"
+          # 主动软超时：在 job 起点后 5h20m 停止编译，留 35 分钟给缓存保存与日志上传。
+          # 若让平台 6h 硬上限触发，所有后续步骤（含 cache Post、失败日志上传）会被 skipped，
+          # 这次编译的成果全部丢失，下次仍要从零开始。
+          DEADLINE=$(( BUILD_START + 320 * 60 ))
+          LEFT=$(( DEADLINE - $(date -u +%s) ))
+          if [ "$LEFT" -lt 600 ]; then
+            echo "::error::距软超时不足 10 分钟，跳过本轮编译（先保存已有 dl / ccache）"
+            exit 1
+          fi
           # 单次编译，不做「-j4 → -j2 → -j1」盲目重试：源码错误重试只会翻倍耗时，
           # OOM 后的半成品还可能让第二次「成功」但产物不可信
-          if ! make -j"$JOBS" > build.log 2>&1; then
-            echo "::error::编译失败，日志尾部 300 行："
+          if ! timeout --signal=INT --kill-after=2m "${LEFT}s" make -j"$JOBS" > build.log 2>&1; then
+            echo "::error::编译失败或触发主动超时，日志尾部 300 行："
             tail -n 300 build.log
             exit 1
           fi
@@ -197,6 +218,17 @@ jobs:
           fi
           echo "编译日志：$(du -h build.log | cut -f1)"
           df -h
+
+      # 紧跟编译步骤、if: always()：编译成功、失败、主动超时都会保存。
+      # 精确命中本周缓存时不重复保存（save 对已存在的 key 会失败）。
+      - name: 保存 dl 与 ccache（编译后必存）
+        if: always() && steps.cache-restore.outcome == 'success' && steps.cache-restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            lede/dl
+            lede/.ccache
+          key: lede-x86_64-${{ env.CACHE_WEEK }}
 
       - name: 整理并校验产物
         working-directory: lede
