@@ -283,18 +283,24 @@ jobs:
           fi
           cp -t "$OUT/firmware" "${fw[@]}"
 
-          # 保留原始目录结构，避免不同 feed 下同名 ipk 互相覆盖
-          find bin -type f -name '*.ipk' -print0 | xargs -0 -r cp --parents -t "$OUT/packages"
+          # 保留原始目录结构，避免不同 feed 下同名 ipk 互相覆盖。
+          # 连同各 feed 的 Packages / Packages.gz / Packages.manifest / Packages.sig 一起带走：
+          # 有索引后，这份产物才能直接挂成本地 opkg 源，用于同批次补装或回滚，
+          # 而不必去外网找 ABI 未必匹配的第三方 ipk（mosdns 版本错配就是这么来的）。
+          find bin -type f \( -name '*.ipk' -o -name 'Packages*' \) -print0 \
+            | xargs -0 -r cp --parents -t "$OUT/packages"
           find bin/targets -type f \( -name '*.buildinfo' -o -name '*.manifest' \
             -o -name '*sums*' -o -name 'profiles.json' \) -exec cp -t "$OUT/buildinfo" {} +
 
           FW=$(find "$OUT/firmware" -type f | wc -l)
-          PKG=$(find "$OUT/packages" -type f | wc -l)
-          echo "固件 $FW 个 / IPK $PKG 个"
+          PKG=$(find "$OUT/packages" -type f -name '*.ipk' | wc -l)
+          IDX=$(find "$OUT/packages" -type f -name 'Packages.gz' | wc -l)
+          echo "固件 $FW 个 / IPK $PKG 个 / opkg 索引 $IDX 个"
+          [ "$IDX" -gt 0 ] || echo "::warning::未生成 Packages.gz，产物只能逐包 opkg install，不能挂成本地源"
           du -sh "$OUT"/*
           {
             echo "### 产物"
-            echo "- 固件 $FW 个，IPK 包 $PKG 个"
+            echo "- 固件 $FW 个，IPK 包 $PKG 个，opkg 索引 $IDX 个（可直接挂成本地源）"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: 上传固件

@@ -9,6 +9,8 @@
 > **11-12 08:46 追加**：首次真实云编译（11-11 run #1）**超时失败**。已按实际运行数据修复并行度与缓存策略，详见第九节；本文档第七、八节的统计已同步更新。
 >
 > **11-12 14:43 追加**：run #2 编译成功（4h37m），但刷机后 LuCI 显示「MosDNS 未运行」。根因是 `helloworld` 与 `packages` 的同名 `mosdns` 包版本错配，已定向修复并新增出厂启用脚本，详见第十一节。符号 52 → **53**。
+>
+> **11-12 15:08 追加**：回答「装 SSR Plus+ 用哪个源」，顺带修好产物缺索引的问题 —— `OpenWrt_package_x86_64` 现在带 `Packages.gz`，可直接挂成本地 opkg 源。详见第十二节。**插件清单未变，仍是 53 个符号。**
 
 ---
 
@@ -286,3 +288,37 @@ Installing package 'luci-app-mosdns' from luci
 本地已完成：YAML 可解析（19 步、timeout 355）、10 段 `run` 与 4 个脚本 `bash -n`；`config.seed` 53 个符号 0 重复 0 行内注释；补丁 `git apply --check` 与应用逐字节一致；`apply.sh` 模拟提交检查三个 uci-defaults 的 `100755`。
 
 **尚未验证**：修复后的固件还没编译、没刷机，`feeds uninstall` + `install -p packages` 只在源码逻辑与 `scripts/feeds` 实现层面核对过（`install_src` 的 `%installed` 机制决定必须先 uninstall 才能覆盖），需要在 runner 上复跑确认软链接校验通过。
+
+---
+
+## 十二、「装 SSR Plus+ 用哪个源」：四种源的辨析与产物索引补齐（11-12 15:08 追加）
+
+**结论先给**：本固件不需要装、也不需要配任何源 —— `luci-app-ssr-plus`、9 个 `INCLUDE_*` 选项与 4 个内核都已编进 rootfs。用户问的「源」实际有四种，混用正是前面 `mosdns` 事故的成因。
+
+### 核实结果（源码 / API 实测）
+
+| 源 | 事实 |
+|---|---|
+| 编译期 feed | `coolsnowwolf/lede@master/feeds.conf.default` 自带 `src-git helloworld https://github.com/fw876/helloworld.git`；`luci-app-ssr-plus` **只在 helloworld**，官方 `packages` / `luci` 里没有 |
+| 分支 | `fw876/helloworld` 当前 `default_branch = dev`；README 只讲三种**编译期**集成方式（clone 到 `package/helloworld`、git submodule、`src-git` feed），**不讲 opkg 在线源** |
+| Releases | 共 18 个，最新 `v198.3`（2026-11-04）带 16 个 assets：`luci-app-ssr-plus_198-r3_all.ipk`、`xray-core_26.10.31-r1_x86_64.ipk`、`mihomo_1.19.33-r1_x86_64.ipk`、中文语言包，以及同名 `.apk`。是散装 CI 产物，**没有 `Packages.gz`，不是软件源**，且面向官方 OpenWrt |
+| 运行期 opkg | 本仓库 run #2 的 `OpenWrt_package_x86_64`（385 MB）原本只收了 `*.ipk`，**缺索引**，只能逐包 install、挂不成源 |
+| 订阅源 | SSR Plus+ 面板里的订阅 URL 是节点配置数据，与软件包源无关 |
+
+### 改动（2 个文件，插件清单不变）
+
+| 文件 | 改动 |
+|---|---|
+| `.github/workflows/build.yml` | 「整理并校验产物」步骤：`find bin -type f \( -name '*.ipk' -o -name 'Packages*' \)` 把各 feed 的 `Packages` / `Packages.gz` / `Packages.manifest` / `Packages.sig` 连同 ipk 按原目录一并复制；统计拆成 `PKG`（只数 ipk）与 `IDX`（`Packages.gz` 数），无索引时发 `::warning::`；Step Summary 增加索引数 |
+| `README.md` | 新增「装 SSR Plus+ 要用哪个『源』」一节：四源对照表、helloworld feed 为何必须首行、为什么不能加外网第三方源、单包 `opkg install` 与本地源挂载的完整命令（按 feed 逐个 `src/gz` + `check_signature 0`）、Releases ipk 的适用场景与 `.apk` 禁用提示 |
+
+**为什么值得改**：`ipk` 与固件的内核、libc、LuCI、kmod ABI 必须同批编译。给产物补上索引，就有一个**与固件完全一致、离线可用**的本地源，补装或回滚时不必去外网碰运气。这不违背「后续不想安装」的目标 —— 正常刷完依旧什么都不用装，只是留了一条安全的后路。
+
+### 验证
+
+- YAML 可解析、10 段 `run` 与 4 个出厂脚本 `bash -n` 全通过；
+- `config.seed` 仍为 **53 个符号、0 重复、0 行内注释**；
+- `openwrtBuild.patch` 重生成，`git apply --check` 与应用逐字节一致；
+- 远端 raw / API 复核。
+
+**未验证**：带索引的产物要等下一次 Run workflow 才会实际生成；修复后的固件（含 mosdns 定向裁决）同样尚未在 runner 上复跑。

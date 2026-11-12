@@ -107,6 +107,56 @@ x86/64 上没有硬件 NAT / HNAT / SFE / NSS（这些是 MTK、高通芯片专�
 
 Lean 主线用 **opkg / ipk**，`openwrt-25.12` 只是 LuCI feed 分支名，别下 apk 格式的第三方包。
 
+## 装 SSR Plus+ 要用哪个「源」
+
+**先说结论：这台固件不用装、也不用配任何源。** `config.seed` 里 `luci-app-ssr-plus` 加 9 个 `INCLUDE_*` 选项、`xray-core` / `mihomo` / `v2ray-core` / `sing-box` 都已编进 rootfs，刷完在「服务 → SSR Plus+」直接配节点即可。下面把容易被混为一谈的四种「源」分开讲。
+
+| 说的「源」 | 用在哪 | 正确答案 |
+|---|---|---|
+| **编译期 feed 源** | 云编译 `feeds.conf.default` | `src-git helloworld https://github.com/fw876/helloworld.git`（lede master 自带，默认分支 `dev`）。`luci-app-ssr-plus` **只在这个 feed**，官方 packages / luci 里没有 |
+| **运行期 opkg 软件源** | 刷好后在路由器上 `opkg install` | **不要加外网第三方源**，用同一次编译产出的 `OpenWrt_package_x86_64`（见下） |
+| **GitHub Releases 里的 ipk** | 想跳过编译直接装 | `fw876/helloworld` 最新 release `v198.3` 带 `luci-app-ssr-plus_198-r3_all.ipk`、`xray-core`/`mihomo` 的 `x86_64.ipk` 和中文语言包，但**不是软件源**，只是散装文件 |
+| **订阅源 / 节点源** | SSR Plus+ 面板里填节点 | 机场给的订阅 URL，是配置数据，跟软件包源完全无关 |
+
+### 编译期：只有 helloworld 提供面板
+
+lede 的 `feeds.conf.default` 自带 6 个 feed：官方 `packages` / `luci` / `routing` / `telephony` / `video` + `helloworld`。SSR Plus+ 的面板、中文语言包、以及带 **EIP93 硬件 AES 加速**和 AnyTLS / TUIC / Snell / ShadowTLS / Kcptun 补丁的 `xray-core` / `mihomo` 都来自 `helloworld`。这也是工作流把它提到首行的原因 —— 同名包按 conf 顺序取先出现的，放后面会被官方 packages 的上游版本覆盖。
+
+`kenzok8/small-package` 那类第三方 feed 虽然也有 ssr-plus，但它与官方 feed 有十几个同名包，已被本仓库移除；**不要为了装一个 SSR 再加回去**。
+
+### 运行期：用自己这批产物做本地源（推荐）
+
+> [!WARNING] 为什么不能随便加个外网 opkg 源
+> ipk 与固件的 **内核版本、libc、LuCI 版本、kmod ABI** 必须来自同一次编译。跨来源混装轻则依赖冲突，重则像 11-12 那次 `mosdns` 版本错配一样：同版本号、不同补丁集，服务直接起不来、LuCI 显示「未运行」。本固件是 Lean 25.12 + opkg，**任何 `.apk` 包都不能装**。
+
+工作流已把各 feed 的 `Packages` / `Packages.gz` / `Packages.manifest` / `Packages.sig` 连同 ipk 一起收进 `OpenWrt_package_x86_64`，所以这份产物本身就是一个完整的本地源。两种用法：
+
+**补装单个包**（最省事，不需要配源）：
+
+```sh
+opkg install /mnt/sda1/OpenWrt_package_x86_64/bin/packages/x86_64/helloworld/luci-app-ssr-plus_*.ipk
+```
+
+**挂成本地源**（要反复装/查依赖时用）。产物按 feed 分目录，每个含 `Packages.gz` 的目录加一行：
+
+```sh
+ROOT=/mnt/sda1/OpenWrt_package_x86_64
+: > /etc/opkg/owb-local.conf
+for d in "$ROOT"/bin/packages/x86_64/* "$ROOT"/bin/targets/x86/64/packages; do
+  [ -f "$d/Packages.gz" ] && echo "src/gz owb_$(basename "$d") file://$d" >> /etc/opkg/owb-local.conf
+done
+echo "option check_signature 0" >> /etc/opkg/owb-local.conf   # 本地源无需验签
+opkg update
+opkg install luci-app-ssr-plus
+```
+
+若固件没有 `/etc/opkg/` 下的自定义配置目录，把同样几行追加到 `/etc/opkg.conf` 即可。用 HTTP 挂也行，把 `file://` 换成 `http://<局域网地址>/...`。
+
+> [!tip] 关于 helloworld 的 GitHub Releases
+> 那里确实能下到 `x86_64` 的 `.ipk`，但它是给**官方 OpenWrt** 跑的 CI 产物：同时提供 `.apk`（OpenWrt 24.10+/snapshot 用），README 只讲三种编译期 feed 集成方式，**没有提供带 `Packages.gz` 的 opkg 源**，一个 release 也只有面板 + xray-core + mihomo + 语言包四个包，缺依赖索引。拿它和 Lean 25.12 混装，等于把 ABI 与 LuCI 版本的一致性交给运气。只在完全拿不到自编译产物、且愿意手工补齐所有依赖时才考虑，并**务必下 `.ipk` 而不是 `.apk`**。
+
+真正需要增删插件时，正确做法仍是改 `config.seed` 重新编译（见下一节），不是 `opkg install`。
+
 ## 加插件
 
 在 `config.seed` 里加一行 `CONFIG_PACKAGE_<包名>=y`，包名必须是官方 feed 里真实存在的目录名。改完手动触发一次，看 Step Summary 的「显式包未生效数」是否为 0（选项类符号的 warning 除外）。
