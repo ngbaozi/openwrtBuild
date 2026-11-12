@@ -1,13 +1,13 @@
 # 最终插件清单与取舍说明
 
-> 定稿 2026-11-11（20:18 追加：去广告从 AdGuardHome 换成 `adblock-fast`）。所有包名与依赖均比对过 `coolsnowwolf/luci@openwrt-25.12`（14205 项 / 180 个应用）、`coolsnowwolf/packages`（7935 项）、`fw876/helloworld`（1121 项）。**不使用任何第三方 feed，不存在同名包被覆盖的问题。** 完整改动列表见 `CHANGES.md`。
+> 定稿 2026-11-11（20:18 追加：去广告从 AdGuardHome 换成 `adblock-fast`；11-12 追加：修正 `mosdns` 同名包错配）。所有包名与依赖均比对过 `coolsnowwolf/luci@openwrt-25.12`（14205 项 / 180 个应用）、`coolsnowwolf/packages`（7935 项）、`fw876/helloworld`（1121 项）。**不使用任何第三方 feed；官方 feed 之间仍有同名包，已在 `build.yml` 中逐项裁决**（`xray-core` / `mihomo` 取 helloworld 加速版，`mosdns` 取 packages 完整补丁版）。完整改动列表见 `CHANGES.md`。
 
 ## 一、最终编入的插件
 
 | 分组 | 包 | 作用 |
 |---|---|---|
 | 代理 | `luci-app-ssr-plus` + `xray-core`、`mihomo`、`v2ray-core`、`sing-box` | 唯一透明代理面板；Xray 覆盖 VLESS Reality / XTLS / xhttp，Mihomo 覆盖 Clash 系节点 |
-| DNS / 去广告 | `luci-app-adblock-fast` + `adblock-fast`、`luci-app-mosdns` | **adblock-fast 在 dnsmasq 层拦广告**（出厂已启用），MosDNS 做国内外分流；两者不争抢 53 |
+| DNS / 去广告 | `luci-app-adblock-fast` + `adblock-fast`、`luci-app-mosdns` + `mosdns` | **adblock-fast 在 dnsmasq 层拦广告**（出厂已启用），MosDNS 做国内外分流；两者不争抢 53。`mosdns` 显式写 `=y`，必须用 packages 版 |
 | 多 WAN | `luci-app-mwan3`、`luci-app-syncdial` | 多 WAN 负载均衡 + 单线多拨（需运营商支持） |
 | 文件 / 娱乐 | `luci-app-filebrowser`、`luci-app-uugamebooster`、`luci-app-unblockneteasemusic` | 网页文件管理 / UU 加速 / 网易云解锁 |
 | 主题 | `luci-theme-argon`、`luci-theme-design`、`luci-app-argon-config`、`luci-app-design-config` | 两套主题 + 各自设置页，运行时切换 |
@@ -44,12 +44,14 @@
 - `coolsnowwolf/packages` 已含 `adblock-fast`、`ddns-go`、`lucky`、`openlist`、`dockerd`、`docker`、`ttyd`、`watchcat`、`nlbwmon`、`banip`、`sqm-scripts`、`irqbalance`、`netdata`、`geo2txt`、`v2ray-geodata`、`sing-box`、`xray-core`、`tailscale`、`qBittorrent`、`syncthing`、`UnblockNeteaseMusic`、`uugamebooster`、`filebrowser`、`mwan3` 等全部底层依赖。
 - 官方 golang 是 **1.27.3**，kenzok8 README 里「换成 golang 1.26」已过时。
 - `helloworld` 提到 `feeds.conf` 首行后，其 `xray-core` 的 `eip93/overlay.py` 与 `190-an7581-eip93-aes-gcm.patch`、`mihomo` 的 `100-an7581-eip93-aes-gcm.patch` 才会被选中；否则会被官方 packages 的同名上游版本覆盖，硬件加速补丁就没了。
+- **但 `mosdns` 必须反向裁决**：`helloworld/mosdns` 是 `5.3.4-1`（3 个补丁），`packages/net/mosdns` 是 `5.3.4-15`（30 个补丁，含 `stats_api` / `adblock_set`）。`luci-app-mosdns` 生成的配置带这些插件，用 helloworld 版二进制会「未知插件」直接退出。工作流在 `feeds install -a` 后执行 `feeds uninstall mosdns` + `feeds install -p packages mosdns`，并校验软链接指向 `feeds/packages/net/mosdns`。
 
 ## 四、使用与风险
 
 1. **只启用一个透明代理**。当前固件里只有 ssr-plus，以后若加了第二个面板，务必只开一个服务。
 2. **去广告出厂已开**：`files/etc/uci-defaults/98-adblock-fast` 在首次开机把 `enabled` 置 1 并启用 Hagezi Pro / OISD Big 两个规则源。官方包默认全是关的，不注入就等于空面板。在「服务 → AdBlock-Fast」可换源、加白名单、暂停；若国内 CDN 拉取失败，换成任一可访问的域名列表即可。
-3. **ACC 默认组合**：BBR + FullCone NAT 开，软件 Flow Offload 关（与 SSR-Plus 透明代理、SQM 互斥，强开会出现「测速正常但分流失效」）。不用代理 / SQM 时在「网络 → 防火墙 → 区域设置」把 *Flow offloading type* 改成 `Software flow offloading` 即可，无需重编译。x86/64 没有 HNAT / SFE / NSS 等硬件加速，硬件卸载保持关闭。
-4. **首次编译 4–6 小时**（十几个 Go 程序 + Docker 内核模块；换掉 AdGuardHome 后少一个 Go 常驻程序）。`timeout-minutes: 345` 是上限，缓存对第二次起效。若超时，先注释 `dockerman` / `dockerd` / `docker` 三行。
-5. 两个主题都编进去了，在「系统 → 语言与界面」里切换，不会冲突。
-6. 产物是 **ipk**，别混装 apk 第三方包。
+3. **MosDNS 出厂已启用**：官方 `/etc/config/mosdns` 默认 `enabled='0'`，`files/etc/uci-defaults/97-mosdns` 把它置 1 并登记开机自启。若页面仍显示「未运行」，先查 `mosdns` 二进制版本（应为 `5.3.4-15`）和 `/var/log/mosdns.log`；「DNS 转发」已开而服务没起来会断网，先关转发恢复上网再排查。远程 DNS 默认 `tls://8.8.8.8`，国内 853 常被干扰，必要时换成可达的加密 DNS。
+4. **ACC 默认组合**：BBR + FullCone NAT 开，软件 Flow Offload 关（与 SSR-Plus 透明代理、SQM 互斥，强开会出现「测速正常但分流失效」）。不用代理 / SQM 时在「网络 → 防火墙 → 区域设置」把 *Flow offloading type* 改成 `Software flow offloading` 即可，无需重编译。x86/64 没有 HNAT / SFE / NSS 等硬件加速，硬件卸载保持关闭。
+5. **首次编译约 4.5 小时**（11-12 run #2 实测 job 4h37m、编译步骤 266 分钟；十几个 Go 程序 + Docker 内核模块）。`timeout-minutes: 355` 是上限，缓存对第二次起效。若超时，先注释 `dockerman` / `dockerd` / `docker` 三行。
+6. 两个主题都编进去了，在「系统 → 语言与界面」里切换，不会冲突。
+7. 产物是 **ipk**，别混装 apk 第三方包。

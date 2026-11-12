@@ -9,6 +9,7 @@
 | `config.seed` | 唯一的编译配置来源：目标平台、ccache、全部要编入的插件与 ssr-plus 选项 |
 | `CHANGES.md` | 本次改动的完整列表（来源、增、删、留、工作流、去广告替换） |
 | `PLUGINS.md` | 最终插件清单、去重逻辑与使用注意 |
+| `files/etc/uci-defaults/97-mosdns` | 首次开机启用 MosDNS 并登记开机自启（官方包默认 `enabled=0`） |
 | `files/etc/uci-defaults/99-acc-tuning` | 出厂网络加速默认值（BBR / FullCone NAT 开，软件 Flow Offload 关） |
 | `files/etc/uci-defaults/98-adblock-fast` | 首次开机启用 adblock-fast 去广告并预置规则源 |
 | `files/etc/sysctl.d/90-acc-tuning.conf` | TCP Fast Open / MTU Probing / 收发缓冲区 |
@@ -28,6 +29,8 @@
 - 原因二：官方 `coolsnowwolf/packages` 已包含全部需要的底层依赖，且 golang 已是 **1.27.3**（比 kenzok8 README 要求的 1.26 更新），不需要再替换 golang 或删除重复包。
 - 原因三：`helloworld` 首行后，选中的是它带 **EIP93 硬件 AES 加速补丁**与 AnyTLS / TUIC / Snell / ShadowTLS / Kcptun 协议补丁的 `xray-core` / `mihomo`，而不是官方 packages 的上游同名版本。
 
+> **唯一例外是 `mosdns`**：`helloworld` 与 `packages` 都定义了这个源包，但 `luci-app-mosdns` 来自 `luci` feed，只认官方 `packages` 版二进制。工作流在 `feeds install -a` 之后执行 `feeds uninstall mosdns` + `feeds install -p packages mosdns`，并用 `readlink -f` 校验软链接来源。详见下一节。
+
 ## 去广告：出厂已带（adblock-fast，不用 AdGuardHome）
 
 去广告改用官方 `coolsnowwolf/packages@master/net/adblock-fast` + `coolsnowwolf/luci@openwrt-25.12/applications/luci-app-adblock-fast`，在 `config.seed` 里两个符号都显式写 `=y`。
@@ -42,6 +45,19 @@
 **必须注入出厂默认值**：官方包自带的 `/etc/config/adblock-fast` 里 `enabled='0'`、所有规则源也是 `enabled='0'`，只编进包等于装了个空面板。`files/etc/uci-defaults/98-adblock-fast` 在首次开机把服务置 1、启用 Hagezi Pro 与 OISD Big 两个不同 CDN 的规则源（任一可达即生效），并 `enable` 开机自启。WAN 未就绪时包自带的 procd 触发器会在联网后重试下载。之后在 **服务 → AdBlock-Fast** 可换源、加白名单、暂停过滤。
 
 > 另两个官方选项未采用：经典 `adblock` 依赖 `firewall4` + `coreutils` + `gawk` 更重且配置项繁杂；`simple-adblock` 没有 LuCI 面板。想换回 AdGuardHome 只需在 `config.seed` 里把两行改回去，同时删掉 `98-adblock-fast`。
+
+## DNS 分流：MosDNS 出厂已带（二进制版本必须匹配）
+
+`luci-app-mosdns`（`luci` feed，1.7.15）生成的配置会用到 `stats_api`、`adblock_set`、日志轮转等插件，这些只有官方 `coolsnowwolf/packages@master/net/mosdns`（`PKG_VERSION 5.3.4` / `PKG_RELEASE 15`，**30 个补丁**）才有。`fw876/helloworld/mosdns` 是同样的 `5.3.4`，但 `PKG_RELEASE 1`、**仅 3 个补丁**。由于 `helloworld` 排在 feed 首行，`feeds install -a` 默认会选中它，于是 mosdns 加载配置时报「未知插件」直接退出 —— LuCI 顶部红字 **MosDNS 未运行**，统计页也一起失效。这不是没装包，也不是 `enabled` 没勾。
+
+工作流已定向裁决并校验软链接；`files/etc/uci-defaults/97-mosdns` 把官方默认的 `enabled='0'` 改成 `1` 并 `enable` 开机自启，刷完不需要手动勾「已启用」。
+
+> [!WARNING] 排查顺序（刷完仍显示未运行时）
+> 1. SSH 里执行 `/etc/init.d/mosdns status`，再看 `logread | grep -i mosdns` 与 `cat /var/log/mosdns.log`，确认是否 `unknown plugin`；
+> 2. `opkg info mosdns | grep Version` 应是 `5.3.4-15` 而不是 `5.3.4-1`；
+> 3. **DNS 转发已开但服务没起来会断网**：先 `uci set mosdns.config.redirect=0; uci commit mosdns; /etc/init.d/dnsmasq restart` 恢复上网，再查原因。
+
+远程 DNS 沿用官方默认 `tls://8.8.8.8`，国内网络下 853 常被干扰。若境外域名解析慢或超时，到「服务 → MosDNS → 基本选项」换成可达的加密 DNS，或指向 SSR Plus+ 提供的本地 DNS 端口；这项与网络环境相关，不适合写死在固件里。
 
 ## 网络加速（ACC）：出厂已带
 
@@ -66,6 +82,7 @@ x86/64 上没有硬件 NAT / HNAT / SFE / NSS（这些是 MTK、高通芯片专�
 - **Docker 是唯一明显拉长编译的项**。若构建仍超时或失败，把 `config.seed` 里 `luci-app-dockerman` / `dockerd` / `docker` 三行注释掉再跑，其余不受影响。
 - **日志里成片的 `has a dependency on ... which does not exist` 是无害的**，不是编译错误：上游 `video` feed 的 `mesa` 依赖 `libdrm-amdgpu` / `-radeon` / `-intel` / `-tegra` / `-etnaviv` / `-nouveau`，但 `feeds install` 按 conf 顺序选中了 `packages` 版 `libdrm`（只定义单个 `libdrm` 包）；`kmscon` 依赖的 `input-support` 在两个 feed 里都没定义。这些是 `defconfig` 扫描**所有** feed Makefile 时的元数据提示，OpenWrt 忽略该依赖继续生成配置；本固件 43 个真实包与 video feed 包目录**交集为 0**。重复几十行是 make 多轮扫描反复打印，不是几十个故障。工作流已在 Step Summary 里归类统计。详见 `CHANGES.md` 第十节。
 - 刷机后**不需要再串联两个 DNS 进程**：adblock-fast 不占 53，MosDNS 保持原样即可。若发现广告没被拦，先到「服务 → AdBlock-Fast」看规则源是否下载成功，必要时换成国内可访问的列表。
+- **页面显示「MosDNS 未运行」不是缺包**，而是 `mosdns` 二进制被同名的 helloworld 版覆盖、与 LuCI 生成的配置不匹配。已在工作流里定向修复；排查命令见「DNS 分流」一节。
 - 软件 Flow Offload 默认关闭（与透明代理、SQM 互斥），开启方式见上节；x86 没有硬件 NAT，硬件卸载请勿开启。
 - `config.seed` 里 `INCLUDE_*` 是 Kconfig `choice`，工作流 Step Summary 的「显式包未生效数」偶尔会列出它们，属正常，不阻断编译；`xray-core`、`mihomo` 已单独写入 seed 兜底。
 
@@ -77,7 +94,8 @@ x86/64 上没有硬件 NAT / HNAT / SFE / NSS（这些是 MTK、高通芯片专�
 - 单次 `make`，并行度按 `nproc` / 内存自适应（公开仓库标准 runner 实为 **4 vCPU / 16GB**，16GB 时 `-j8`、内存 <12GB 降为 `-j4`，上限 8），删掉 `-j4 → -j2 → -j1` 盲重试；`timeout-minutes: 355`；编译命令由 `timeout --signal=INT` 包一层软超时（job 起点 + 5h20m），确保缓存与 `build.log` 能落地；`concurrency` 防重复并发。
 - 不再吞错：去掉 `continue-on-error` 与满屏 `|| true`；三个产物上传全部 `if-no-files-found: error`；没有固件直接判失败；失败时上传 `build.log`。
 - `free-disk-space` 用新仓库名 `lumbroso-commons/...` 与新参数 `preinstalled-runtimes`；**保留 swap**（`swap-storage: false`），避免内存压力下被静默杀掉；`upload-artifact` v7。
-- 新增「注入出厂默认值（ACC + 去广告）」步骤：把 `files/` 下两个 uci-defaults 脚本与 sysctl.d 配置复制进 `lede/files/`，校验可执行位与关键行，随 rootfs 一起编进固件。
+- 新增「配置软件源」的同名包定向裁决：`feeds uninstall mosdns` + `feeds install -p packages mosdns` + 软链接来源校验，避免 helloworld 版 mosdns 与 luci-app-mosdns 配置错配。
+- 新增「注入出厂默认值（ACC + 去广告 + DNS）」步骤：把 `files/` 下三个 uci-defaults 脚本与 sysctl.d 配置复制进 `lede/files/`，校验可执行位与关键行，随 rootfs 一起编进固件。
 
 ## 产物
 

@@ -1,0 +1,21 @@
+#!/bin/sh
+# 官方 luci-app-mosdns 的 /etc/config/mosdns 默认 enabled='0'。
+# 只把包编进固件而不写这一项，首次开机就是一个「装了但没跑」的空面板
+# （LuCI 顶部红字 MosDNS 未运行）。这里补上出厂默认值并登记开机自启。
+# /etc/uci-defaults 里的脚本首次开机执行一次后由系统自动删除。
+#
+# 注意：remote_dns 沿用官方默认 tls://8.8.8.8。若国内网络下境外域名解析
+# 超时，请到「服务 → MosDNS → 基本选项」把它换成可达的加密 DNS，或指向
+# SSR Plus+ 提供的本地 DNS 端口；这项与路由环境相关，不适合写死在固件里。
+[ -f /etc/config/mosdns ] || exit 0
+
+uci -q batch <<'EOF'
+set mosdns.config.enabled='1'
+set mosdns.config.configfile='/var/etc/mosdns.json'
+set mosdns.config.redirect='1'
+set mosdns.config.local_dns_redirect='0'
+commit mosdns
+EOF
+
+/etc/init.d/mosdns enable
+exit 0

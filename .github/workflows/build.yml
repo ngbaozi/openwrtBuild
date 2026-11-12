@@ -95,7 +95,7 @@ jobs:
           restore-keys: |
             lede-x86_64-
 
-      - name: 配置软件源（仅官方 feed，零同名包冲突）
+      - name: 配置软件源（官方 feed + 同名包定向裁决）
         working-directory: lede
         run: |
           set -euo pipefail
@@ -119,6 +119,27 @@ jobs:
 
           ./scripts/feeds update -a
           ./scripts/feeds install -a
+
+          # 首行策略的副作用：helloworld 与 packages 都定义了源包 mosdns。
+          # feeds install -a 按 conf 顺序取先出现的，会装成 helloworld 版
+          # （PKG_RELEASE:=1，只有 203/204/205 三个补丁）。而 luci-app-mosdns
+          # 来自 luci feed，它生成的配置里带 stats_api / adblock_set 等插件，
+          # 这些是官方 packages 版（PKG_RELEASE:=15，30 个补丁）才有的。
+          # 版本错配时 mosdns 加载配置即报「未知插件」退出，LuCI 显示「未运行」。
+          # 因此单独把 mosdns 裁决给 packages；xray-core / mihomo 等其余同名包
+          # 仍保留 helloworld 的 EIP93 / 协议补丁版。
+          ./scripts/feeds uninstall mosdns
+          ./scripts/feeds install -p packages mosdns
+
+          links=$(find package/feeds -maxdepth 2 -type l -name mosdns)
+          [ "$(printf '%s\n' "$links" | grep -c .)" -eq 1 ] || {
+            echo "::error::mosdns 软链接数量异常：${links:-<无>}"; exit 1;
+          }
+          target=$(readlink -f "$links")
+          [ "$target" = "$PWD/feeds/packages/net/mosdns" ] || {
+            echo "::error::mosdns 指向 $target，不是官方 packages 版"; exit 1;
+          }
+          echo "::notice::mosdns 定向到官方 packages feed：$target"
 
       - name: 生成并校验 .config
         working-directory: lede
@@ -164,7 +185,7 @@ jobs:
           CCACHE_DIR="$PWD/.ccache" ccache -M 4G
           CCACHE_DIR="$PWD/.ccache" ccache -z
 
-      - name: 注入出厂默认值（ACC + 去广告）
+      - name: 注入出厂默认值（ACC + 去广告 + DNS）
         working-directory: lede
         run: |
           set -euo pipefail
@@ -172,19 +193,23 @@ jobs:
           # /etc/uci-defaults 里的脚本在首次开机执行一次后由系统自动删除。
           # 这里只写参数，不装任何包：内核模块与应用均由 config.seed 编入。
           mkdir -p files/etc/uci-defaults files/etc/sysctl.d
-          install -m 0755 "$GITHUB_WORKSPACE/files/etc/uci-defaults/99-acc-tuning" \
-            files/etc/uci-defaults/99-acc-tuning
+          install -m 0755 "$GITHUB_WORKSPACE/files/etc/uci-defaults/97-mosdns" \
+            files/etc/uci-defaults/97-mosdns
           install -m 0755 "$GITHUB_WORKSPACE/files/etc/uci-defaults/98-adblock-fast" \
             files/etc/uci-defaults/98-adblock-fast
+          install -m 0755 "$GITHUB_WORKSPACE/files/etc/uci-defaults/99-acc-tuning" \
+            files/etc/uci-defaults/99-acc-tuning
           install -m 0644 "$GITHUB_WORKSPACE/files/etc/sysctl.d/90-acc-tuning.conf" \
             files/etc/sysctl.d/90-acc-tuning.conf
           # 校验注入内容确实落地，避免 CI 里静默漏掉
-          test -x files/etc/uci-defaults/99-acc-tuning
+          test -x files/etc/uci-defaults/97-mosdns
           test -x files/etc/uci-defaults/98-adblock-fast
+          test -x files/etc/uci-defaults/99-acc-tuning
+          grep -Fq "set mosdns.config.enabled='1'" files/etc/uci-defaults/97-mosdns
           grep -Fq 'set firewall.@defaults[0].tcpcca=bbr' files/etc/uci-defaults/99-acc-tuning
           grep -Fq "adblock-fast.config.enabled='1'" files/etc/uci-defaults/98-adblock-fast
           grep -Fq 'net.ipv4.tcp_fastopen=3' files/etc/sysctl.d/90-acc-tuning.conf
-          echo "::notice::已注入 BBR / FullCone NAT 出厂默认值（软件 Flow Offload 关）与 adblock-fast 去广告开机启用"
+          echo "::notice::已注入 MosDNS 开机启用、adblock-fast 去广告启用、BBR / FullCone NAT 出厂默认值（软件 Flow Offload 关）"
 
       - name: 下载源码包
         working-directory: lede

@@ -2,11 +2,13 @@
 
 **目标**：所有插件一次编进固件，后续不再 opkg 安装；消除同名包重复；来源收敛到官方 feed，保证可编译。
 
-**结果**：编译包从 **13 个 CONFIG_PACKAGE 符号 → 52 个**（其中 LuCI 应用/主题 33 个、底层服务 7 个、ACC 加速内核模块 3 个、ssr-plus 选项 9 个）；第三方 feed 从 2 个 → 0 个；重复代理面板从 2 个 → 1 个。
+**结果**：编译包从 **13 个 CONFIG_PACKAGE 符号 → 53 个**（其中 LuCI 应用/主题 33 个、底层服务 8 个、ACC 加速内核模块 3 个、ssr-plus 选项 9 个）；第三方 feed 从 2 个 → 0 个；重复代理面板从 2 个 → 1 个；官方 feed 之间的同名包已逐项裁决（详见第十一节）。
 
 > **20:18 追加**：去广告由 AdGuardHome 换成官方 `adblock-fast`，并注入出厂启用脚本。详见第六节；这是在同一次交付里的追加改动，前面各节的统计已同步更新。改动已推送到 `ngbaozi/openwrtBuild` 的 `main` 分支。
 >
-> **11-12 08:46 追加**：首次真实云编译（11-11 run #1）**超时失败**。已按实际运行数据修复并行度与缓存策略，详见第九节；本文档第七、八节的统计已同步更新。**插件清单本身未变，仍是 52 个符号。**
+> **11-12 08:46 追加**：首次真实云编译（11-11 run #1）**超时失败**。已按实际运行数据修复并行度与缓存策略，详见第九节；本文档第七、八节的统计已同步更新。
+>
+> **11-12 14:43 追加**：run #2 编译成功（4h37m），但刷机后 LuCI 显示「MosDNS 未运行」。根因是 `helloworld` 与 `packages` 的同名 `mosdns` 包版本错配，已定向修复并新增出厂启用脚本，详见第十一节。符号 52 → **53**。
 
 ---
 
@@ -215,3 +217,72 @@
 > 注释掉 `src-git video` 或删 `package/feeds/video/{mesa,kmscon}` 符号链接确实能让日志干净，但会改变依赖解析环境。run #2 正在验证 `-j8` 修复，**此时改 feed 结构会让失败原因无法归因**。等这次编译成功后，若要彻底静音再单独处理，风险更低。
 
 **真正该盯的三个信号**：① 「显式包未生效数」是否为 0；② 编译步骤是否报错；③ 产物步骤是否生成固件。这些都不受上述警告影响。
+
+## 十一、刷机后「MosDNS 未运行」：同名包版本错配（11-12 追加）
+
+**背景**：run #2（`43131193707`）在 11-12 05:35 UTC **success**，总耗时 4h37m（编译步骤 266 分钟），固件与 ipk 全部产出；`-j8` + `restore/save` 缓存修复得到验证。刷机后 LuCI「服务 → MosDNS」顶部显示红字 **MosDNS 未运行**（版本 `V5.3.4`，已启用 ✅、监听 5335、内置预设、DNS 转发 ✅、DNS 重定向 ⬜）。
+
+### 结论：不是没装包，是 `mosdns` 二进制装错了版本
+
+`feeds.conf.default` 把 `helloworld` 提到首行（为了 xray-core / mihomo 的 EIP93 加速补丁），而 **`helloworld` 与 `packages` 都定义了源包 `mosdns`**。`feeds install -a` 按 conf 顺序取先出现的同名包，于是装成了 helloworld 版。
+
+**run #2 构建日志原文（决定性证据）**：
+
+```
+##[notice]首行 feed：src-git helloworld https://github.com/fw876/helloworld.git
+Installing all packages from feed helloworld.
+Installing package 'mosdns' from helloworld
+Installing package 'luci-app-mosdns' from luci
+ make[2] -C feeds/helloworld/mosdns download
+```
+
+| | `fw876/helloworld/mosdns`（**实际编入**） | `coolsnowwolf/packages/net/mosdns`（**应该用**） |
+|---|---|---|
+| PKG_VERSION / RELEASE | `5.3.4` / `1` | `5.3.4` / `15` |
+| 补丁数 | **3**（203 / 204 / 205） | **30**（含 `216-plugin-add-stats_api-plugin.patch`、`207-add-adblock_set-database-plugin.patch`、日志轮转、cache prefetch、query log…） |
+| 能加载 LuCI 生成的配置吗 | **不能** | 能 |
+
+`luci-app-mosdns`（`luci` feed，1.7.15）的 `/etc/init.d/mosdns` 用 `jshn` 生成 `/var/etc/mosdns.json`，其中无条件带 `type: adblock_set`（blocklist 插件），`stats_collector=1` 时还带 `type: stats_api`。这两个都是 packages 版补丁新增的插件类型，helloworld 版二进制遇到就是 `unknown plugin` → 启动即退出。LuCI 的「未运行」来自 `callServiceList('mosdns')` 读 procd 实例的 `running` 状态，所以进程反复 respawn / 退出时页面就一直是红字，统计页也会失效（`luci.mosdns` 依赖 `127.0.0.1:$listen_port_api/plugins/stats_collector/...`，同样需要 `stats_api` 补丁）。
+
+### 本次改动（10 个文件）
+
+| 文件 | 改动 |
+|---|---|
+| `.github/workflows/build.yml` | 「配置软件源」步骤在 `feeds install -a` 之后执行 `./scripts/feeds uninstall mosdns` + `./scripts/feeds install -p packages mosdns`，再用 `find` + `readlink -f` **强制校验**软链接唯一且指向 `$PWD/feeds/packages/net/mosdns`，否则 `::error::` 直接失败。其余同名包（xray-core / mihomo）保持 helloworld 加速版。步骤名由「零同名包冲突」改为「官方 feed + 同名包定向裁决」 |
+| `config.seed` | DNS 段新增 `CONFIG_PACKAGE_mosdns=y` 显式兜底（符号 **52 → 53**，底层服务 7 → 8）；注释写明版本要求与裁决方式；首行「零第三方重复包」改为「同名包已定向裁决」 |
+| `files/etc/uci-defaults/97-mosdns` | **新增**（100755）：官方 `/etc/config/mosdns` 默认 `enabled='0'`，首次开机置 1、确认 `configfile=/var/etc/mosdns.json`、`redirect=1`、`local_dns_redirect=0`，并 `/etc/init.d/mosdns enable`。刷完不用手动勾「已启用」 |
+| `.github/workflows/build.yml` | 「注入出厂默认值」改名（ACC + 去广告 + **DNS**），多复制并校验 97 脚本 |
+| `apply.sh` | 复制 / chmod / `git update-index --chmod=+x` 三个 uci-defaults 脚本；提交信息更新 |
+| `README.md` / `PLUGINS.md` / `CHANGES.md` | 新增「DNS 分流」小节、排查顺序、同名包裁决说明；修正 `PLUGINS.md` 里「不存在同名包被覆盖的问题」的过时结论与 `timeout-minutes: 345` 旧值 |
+| `openwrtBuild.patch` | 重新生成，含 97-mosdns |
+
+**没有改 feed 顺序**，也没有删 helloworld 的加速补丁 —— 只针对 mosdns 这一个包做反向裁决，把副作用降到最小。`luci-app-ssr-plus` 自带的 `mosdns-config.yaml` 只用 `cache` / `forward` / `sequence` / `udp_server` / `tcp_server` 标准插件，官方版二进制完全兼容。
+
+### 当前这台设备怎么救急（不用等重新编译）
+
+> [!DANGER] 「DNS 转发」已开而服务没起来会断网
+> dnsmasq 的上游被指向 `127.0.0.1#5335`，端口没人监听就全网卡在解析。先恢复上网：
+> ```sh
+> uci set mosdns.config.redirect=0; uci commit mosdns
+> /etc/init.d/mosdns stop; /etc/init.d/dnsmasq restart
+> ```
+
+之后按需要二选一：
+
+1. **推荐：等重新编译刷机**（修复后的固件里 mosdns 是 `5.3.4-15`，且出厂已启用）。Actions → Run workflow，约 4.5 小时，产物在 Artifacts。
+2. **临时让现有固件跑起来**（权宜之计，统计页与内置 blocklist 会失效；去广告本来由 adblock-fast 在 dnsmasq 层承担，不受影响）：把生成配置里两个不兼容插件换掉再重启 ——
+   ```sh
+   sed -i 's/json_add_string "type" "adblock_set"/json_add_string "type" "domain_set"/' /etc/init.d/mosdns
+   uci set mosdns.config.stats_collector=0; uci commit mosdns
+   /etc/init.d/mosdns restart
+   cat /var/log/mosdns.log     # 若仍有 unknown plugin，说明还有补丁专属字段，需换自定义 yaml
+   ```
+   这不是根治：helloworld 版还缺日志轮转、cache prefetch 等补丁，LuCI 的高级选项可能对不上。
+
+排查命令速查：`/etc/init.d/mosdns status`、`logread | grep -i mosdns`、`opkg info mosdns | grep Version`（应为 `5.3.4-15` 而非 `-1`）。远程 DNS 默认 `tls://8.8.8.8`，国内 853 常被干扰；境外域名解析超时时换成可达的加密 DNS 或指向 SSR Plus+ 的本地 DNS 端口 —— 这项与网络环境相关，不写死在固件里。
+
+### 验证状态
+
+本地已完成：YAML 可解析（19 步、timeout 355）、10 段 `run` 与 4 个脚本 `bash -n`；`config.seed` 53 个符号 0 重复 0 行内注释；补丁 `git apply --check` 与应用逐字节一致；`apply.sh` 模拟提交检查三个 uci-defaults 的 `100755`。
+
+**尚未验证**：修复后的固件还没编译、没刷机，`feeds uninstall` + `install -p packages` 只在源码逻辑与 `scripts/feeds` 实现层面核对过（`install_src` 的 `%installed` 机制决定必须先 uninstall 才能覆盖），需要在 runner 上复跑确认软链接校验通过。
