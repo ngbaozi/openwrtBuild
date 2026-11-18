@@ -246,13 +246,37 @@ jobs:
           # 单次编译，不做「-j4 → -j2 → -j1」盲目重试：源码错误重试只会翻倍耗时，
           # OOM 后的半成品还可能让第二次「成功」但产物不可信
           if ! timeout --signal=INT --kill-after=2m "${LEFT}s" make -j"$JOBS" > build.log 2>&1; then
-            # -j 并行时真实错误散落在全文，tail 300 全是进度行。
-            # 先按错误特征 grep 全文，再补尾部；OOM/信号单独报告。
-            echo "::error::编译失败或触发主动超时，真实错误行（全文 grep）："
-            grep -nEi '(^|[^[:alnum:]_])(error:|fatal error|No rule to make target|undefined reference|cannot find|Killed|signal [0-9]|Out of memory|Permission denied|not found)' build.log | tail -n 80 || true
-            echo "::error::OOM / 信号证据："
+            # OpenWrt 并行编译把每个包/阶段的真实输出写进 logs/，stdout 只有进度行。
+            # 所以 build.log 里往往没有任何错误行——必须扫 logs/ 才能拿到真相。
+            echo "::error::===== 磁盘空间（镜像/索引阶段常见失败原因）====="
+            df -h . /tmp 2>/dev/null || df -h
+            echo "::error::===== build.log 错误行（修正模式：Error 1 / *** / No space / V=s）====="
+            grep -nEi '(error[[:space:]]*:|error [0-9]|\*\*\*|No rule to make target|undefined reference|cannot find|No space left|disk quota|Killed|signal [0-9]|out of memory|Permission denied|not found|recipe for target)' build.log | tail -n 80 || true
+            echo "::error::===== OOM / 信号证据 ====="
             grep -nEi 'killed process|out of memory|oom-kill|signal 9' build.log | tail -n 20 || true
-            echo "::error::日志尾部 300 行："
+            # 扫描 logs/ 下所有编译日志的真实错误行（这才是并行编译错误的落点）
+            if [ -d logs ]; then
+              echo "::error::===== lede/logs/ 中的真实错误（最后修改的 30 个日志文件）====="
+              find logs -type f -printf '%T@ %p\n' 2>/dev/null \
+                | sort -rn | head -30 | cut -d' ' -f2- | while IFS= read -r lf; do
+                  hits=$(grep -nEi '(error[[:space:]]*:|error [0-9]|\*\*\*|No rule to make target|undefined reference|cannot find|No space left|disk quota|Killed|signal [0-9]|out of memory|recipe for target|failed)' "$lf" 2>/dev/null | tail -n 8 || true)
+                  if [ -n "$hits" ]; then
+                    echo "--- $lf ---"
+                    echo "$hits"
+                  fi
+                done
+              echo "::error::===== logs/ 目录体积与文件数 ====="
+              du -sh logs 2>/dev/null || true
+              find logs -type f 2>/dev/null | wc -l
+            else
+              echo "::error::lede/logs/ 目录不存在，无法扫描子包错误"
+            fi
+            # 单线程详细重跑失败目标，让错误打到 stdout（增量编译，不会从头再来）
+            echo "::error::===== 单线程 V=s 复现真实错误（make -j1 V=s world，增量）====="
+            make -j1 V=s 2>&1 | tee retry-vs.log | tail -n 150 || true
+            echo "::error::===== V=s 重跑的错误行 ====="
+            grep -nEi '(error[[:space:]]*:|error [0-9]|\*\*\*|No rule to make target|undefined reference|cannot find|No space left|recipe for target)' retry-vs.log | tail -n 60 || true
+            echo "::error::===== build.log 日志尾部 300 行 ====="
             tail -n 300 build.log
             exit 1
           fi
@@ -340,6 +364,9 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: build-log-${{ github.run_id }}
-          path: lede/build.log
+          path: |
+            lede/build.log
+            lede/retry-vs.log
+            lede/logs/
           if-no-files-found: warn
           retention-days: 3
