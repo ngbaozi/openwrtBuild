@@ -228,10 +228,12 @@ jobs:
           echo "::notice::日志开头的 'Makefile ... has a dependency on ... which does not exist' 是上游 video feed 元数据警告（mesa / kmscon 依赖过时），与选中的 52 个包无关，不阻断编译；详见 Step Summary 配置校验"
           CORES=$(nproc)
           MEM_GB=$(awk '/MemTotal/ {printf "%d", $2/1024/1024}' /proc/meminfo)
-          # 16GB 用 核心数×2；内存不足 12GB 时降到核心数，避免 Go 包并发编译 OOM
-          if [ "$MEM_GB" -ge 12 ]; then JOBS=$(( CORES * 2 )); else JOBS=$CORES; fi
-          if [ "$JOBS" -gt 8 ]; then JOBS=8; fi
-          echo "::notice::CPU ${CORES} 核 / ${MEM_GB}GB，使用 -j${JOBS}（公开仓库标准 runner 实测值）"
+          # xray-core(Go 1.27)、rust、qBittorrent 等单包编译就吃 4~6GB。
+          # -j8 在 4 核 / 15GB runner 上极易 OOM；被 SIGKILL 的进程不打印编译错误，
+          # 只留下裸的 "build failed"，无法定位。降到核心数 -j4，稳定优先。
+          JOBS=$CORES
+          if [ "$JOBS" -gt 4 ]; then JOBS=4; fi
+          echo "::notice::CPU ${CORES} 核 / ${MEM_GB}GB，使用 -j${JOBS}（Go/Rust 包并发下调，避免 OOM）"
           # 主动软超时：在 job 起点后 5h20m 停止编译，留 35 分钟给缓存保存与日志上传。
           # 若让平台 6h 硬上限触发，所有后续步骤（含 cache Post、失败日志上传）会被 skipped，
           # 这次编译的成果全部丢失，下次仍要从零开始。
@@ -244,7 +246,13 @@ jobs:
           # 单次编译，不做「-j4 → -j2 → -j1」盲目重试：源码错误重试只会翻倍耗时，
           # OOM 后的半成品还可能让第二次「成功」但产物不可信
           if ! timeout --signal=INT --kill-after=2m "${LEFT}s" make -j"$JOBS" > build.log 2>&1; then
-            echo "::error::编译失败或触发主动超时，日志尾部 300 行："
+            # -j 并行时真实错误散落在全文，tail 300 全是进度行。
+            # 先按错误特征 grep 全文，再补尾部；OOM/信号单独报告。
+            echo "::error::编译失败或触发主动超时，真实错误行（全文 grep）："
+            grep -nEi '(^|[^[:alnum:]_])(error:|fatal error|No rule to make target|undefined reference|cannot find|Killed|signal [0-9]|Out of memory|Permission denied|not found)' build.log | tail -n 80 || true
+            echo "::error::OOM / 信号证据："
+            grep -nEi 'killed process|out of memory|oom-kill|signal 9' build.log | tail -n 20 || true
+            echo "::error::日志尾部 300 行："
             tail -n 300 build.log
             exit 1
           fi
