@@ -271,9 +271,15 @@ jobs:
             else
               echo "::error::lede/logs/ 目录不存在，无法扫描子包错误"
             fi
-            # 单线程详细重跑失败目标，让错误打到 stdout（增量编译，不会从头再来）
-            echo "::error::===== 单线程 V=s 复现真实错误（make -j1 V=s world，增量）====="
-            make -j1 V=s 2>&1 | tee retry-vs.log | tail -n 150 || true
+            # 单线程详细重跑失败目标，让错误打到 stdout（增量编译，已完成的目标会跳过）。
+            # 先只跑 target/install（镜像生成，日志里它排在失败点前一步），命中率高且快；
+            # 若它还不够，再跑 json_overview_image_info。最后才退回整个 world。
+            echo "::error::===== 单线程 V=s 精准复现：target/install ====="
+            make -j1 V=s target/install 2>&1 | tee retry-vs.log | tail -n 120 || true
+            if ! grep -qEi '(error[[:space:]]*:|error [0-9]|\*\*\*|No rule to make target|No space left|recipe for target)' retry-vs.log; then
+              echo "::error::===== target/install 无错，继续 V=s 复现：json_overview_image_info ====="
+              make -j1 V=s json_overview_image_info 2>&1 | tee -a retry-vs.log | tail -n 120 || true
+            fi
             echo "::error::===== V=s 重跑的错误行 ====="
             grep -nEi '(error[[:space:]]*:|error [0-9]|\*\*\*|No rule to make target|undefined reference|cannot find|No space left|recipe for target)' retry-vs.log | tail -n 60 || true
             echo "::error::===== build.log 日志尾部 300 行 ====="
@@ -357,6 +363,40 @@ jobs:
           name: OpenWrt_buildinfo_x86_64
           path: artifact/buildinfo/
           if-no-files-found: error
+          retention-days: 7
+
+      # 失败兜底：OpenWrt 的 world 依赖顺序是 target/install(生成固件镜像) → package/index
+      # → json_overview_image_info。若挂在最后的索引阶段，固件镜像其实已生成，只是 make
+      # 返回非 0 导致常规产物步骤被跳过。这里单独把已生成的固件捞出来，避免白等一轮。
+      - name: 抢救已生成的固件（失败时）
+        if: failure()
+        working-directory: lede
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/rescue"
+          found=$(find bin/targets -type f -size +1M \( \
+            -name '*.img.gz' -o -name '*.img' -o -name '*.vmdk' -o -name '*.vhdx' \
+            -o -name '*.vdi' -o -name '*.iso' -o -name '*.bin' \
+            -o -name '*rootfs*.tar.gz' -o -name '*sysupgrade*.tar.gz' \) | wc -l)
+          echo "失败后检索到固件文件：$found 个"
+          if [ "$found" -gt 0 ]; then
+            find bin/targets -type f -size +1M \( \
+              -name '*.img.gz' -o -name '*.img' -o -name '*.vmdk' -o -name '*.vhdx' \
+              -o -name '*.vdi' -o -name '*.iso' -o -name '*.bin' \
+              -o -name '*rootfs*.tar.gz' -o -name '*sysupgrade*.tar.gz' \) \
+              -exec cp -t "$GITHUB_WORKSPACE/rescue" {} +
+            echo "::notice::已抢救 $found 个固件文件到 rescue 产物，可直接下载刷机"
+          else
+            echo "::warning::未发现已生成的固件文件，本次确实未产出镜像"
+          fi
+
+      - name: 上传抢救固件（失败时）
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: OpenWrt_rescue_firmware_${{ github.run_id }}
+          path: rescue/
+          if-no-files-found: warn
           retention-days: 7
 
       - name: 上传编译日志（失败时）
