@@ -3,7 +3,7 @@ name: Lean OpenWrt x86/64 云编译
 # 定时 + 手动触发。cron 恒按 UTC 计算，与 runner 时区无关。
 on:
   schedule:
-    - cron: '0 2 * * 1'   # 每周一 UTC 02:00 = 北京时间 10:00
+    - cron: '0 20 * * *'   # 每天 UTC 20:00 = 北京时间次日 04:00
   workflow_dispatch:
     inputs:
       lede_ref:
@@ -276,7 +276,9 @@ jobs:
             # 若它还不够，再跑 json_overview_image_info。最后才退回整个 world。
             echo "::error::===== 单线程 V=s 精准复现：target/install ====="
             make -j1 V=s target/install 2>&1 | tee retry-vs.log | tail -n 120 || true
-            if ! grep -qEi '(error[[:space:]]*:|error [0-9]|\*\*\*|No rule to make target|No space left|recipe for target)' retry-vs.log; then
+            # x86 EFI 镜像生成时 root-x86/boot/ 可能不存在，cp 报 Error 1 但带 (ignored)，
+            # 这是 make 主动忽略的无害告警；不过滤会误判 target/install 有错，跳过真正失败点复现。
+            if ! grep -v '(ignored)' retry-vs.log | grep -qEi '(error[[:space:]]*:|error [0-9]|\*\*\*|No rule to make target|No space left|recipe for target)'; then
               echo "::error::===== target/install 无错，继续 V=s 复现：json_overview_image_info ====="
               make -j1 V=s json_overview_image_info 2>&1 | tee -a retry-vs.log | tail -n 120 || true
             fi
